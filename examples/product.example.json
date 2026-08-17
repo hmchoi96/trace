@@ -1,0 +1,28 @@
+{
+  "list_name": "acme",
+  "profile_kind": "problem_validation",
+  "email_mode": "trace_strategy_email",
+  "product_name": "Acme",
+  "product_context": "Internal brief only. Do not dump this into the email.\n\nWHAT IT IS: a short description of the product.\nWHO TO WRITE: the people who live with the workflow, not commentators or vendors selling the same thing.\nTRIGGER TO INFER: live work on the problem, even if they never named your product.\nEMAIL SHAPE: one observed fact → why you are writing → one low-friction ask.\nNever invent customers, launches, or metrics.",
+  "sign_off": "Alex\nAcme",
+  "sender_block": "=== SENDER (verified for this campaign) ===\n- Name: Alex\n- Company: Acme\n- Current work: one line on what you actually do\n- Desired outcome: the conversation you want\n- Recipient value: why this is useful to them, not a pitch deck\n- Constraints: Apollo FACTS only; no fabricated customers or metrics\n=== end sender ===",
+  "discovery": {
+    "product_name": "Acme",
+    "what_it_does": "One or two sentences: what the product does in the buyer's workflow.",
+    "target_users_or_buyers": "Who actually does the work or buys the tool. Named roles and company types beat a vague industry label.",
+    "problems_it_solves": [
+      "The recurring job they already do the hard way",
+      "The workaround that costs time or attention"
+    ],
+    "examples_of_problem_signals": [
+      "A first-person sentence someone might post or say while doing the work",
+      "Another concrete complaint, not a category slogan"
+    ],
+    "obvious_non_targets_or_adjacent_vendors": [
+      "People selling a product in the same category",
+      "Commentators describing the problem without owning the workflow",
+      "Buyers so large they are not a realistic first customer"
+    ],
+    "search_guidance": "Do not hunt for people asking for the product by name. Hunt for people mid-workflow whose ingredient, tool, or process is still unset."
+  }
+}
