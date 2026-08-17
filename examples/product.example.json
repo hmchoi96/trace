@@ -1,28 +1,30 @@
 {
-  "list_name": "acme",
+  "list_name": "stockline",
   "profile_kind": "problem_validation",
   "email_mode": "trace_strategy_email",
-  "product_name": "Acme",
-  "product_context": "Internal brief only. Do not dump this into the email.\n\nWHAT IT IS: a short description of the product.\nWHO TO WRITE: the people who live with the workflow, not commentators or vendors selling the same thing.\nTRIGGER TO INFER: live work on the problem, even if they never named your product.\nEMAIL SHAPE: one observed fact → why you are writing → one low-friction ask.\nNever invent customers, launches, or metrics.",
-  "sign_off": "Alex\nAcme",
-  "sender_block": "=== SENDER (verified for this campaign) ===\n- Name: Alex\n- Company: Acme\n- Current work: one line on what you actually do\n- Desired outcome: the conversation you want\n- Recipient value: why this is useful to them, not a pitch deck\n- Constraints: Apollo FACTS only; no fabricated customers or metrics\n=== end sender ===",
+  "product_name": "Stockline",
+  "product_context": "Internal brief only. Do not dump this into the email.\n\nWHAT IT IS: Stockline helps independent coffee-shop owners see what they actually used last week before they place the next wholesale order.\nWHO TO WRITE: owner-operators who still order from a spreadsheet, last week's invoice, or memory. Not restaurant consultants. Not Square/Toast salespeople.\nTRIGGER TO INFER: they talk about over-ordering milk, running out of a pastry, or rebuilding the order list every Sunday. They do not need to have asked for inventory software.\nEMAIL SHAPE: one observed fact about their ordering week → I am building Stockline for that → one low-friction question.\nNever invent customers, launches, or metrics.",
+  "sign_off": "Sam\nStockline",
+  "sender_block": "=== SENDER (verified for this campaign) ===\n- Name: Sam\n- Company: Stockline\n- Current work: helping independent coffee shops order from last week's actual usage instead of a rebuilt spreadsheet\n- Desired outcome: a short call about how they place the weekly wholesale order\n- Recipient value: they spend less Sunday night rebuilding the same list\n- Constraints: only use facts from the research file; no fake customers or numbers\n=== end sender ===",
   "discovery": {
-    "product_name": "Acme",
-    "what_it_does": "One or two sentences: what the product does in the buyer's workflow.",
-    "target_users_or_buyers": "Who actually does the work or buys the tool. Named roles and company types beat a vague industry label.",
+    "product_name": "Stockline",
+    "what_it_does": "Shows independent coffee-shop owners what they actually used last week so the next wholesale order is not rebuilt from memory.",
+    "target_users_or_buyers": "Owner-operators of 1-5 location coffee shops in North America who still place the weekly order themselves.",
     "problems_it_solves": [
-      "The recurring job they already do the hard way",
-      "The workaround that costs time or attention"
+      "Rebuilding the wholesale order from last week's invoice or a spreadsheet every Sunday",
+      "Over-ordering milk or pastries because usage is not written down",
+      "Running out mid-week and placing a panic order"
     ],
     "examples_of_problem_signals": [
-      "A first-person sentence someone might post or say while doing the work",
-      "Another concrete complaint, not a category slogan"
+      "I still do the wholesale order myself every Sunday from last week's invoice",
+      "We ran out of oat milk again because I guessed the order",
+      "The spreadsheet is a mess so I just copy last week and hope"
     ],
     "obvious_non_targets_or_adjacent_vendors": [
-      "People selling a product in the same category",
-      "Commentators describing the problem without owning the workflow",
-      "Buyers so large they are not a realistic first customer"
+      "People selling Square, Toast, or other restaurant POS / inventory products",
+      "Consultants writing about cafe operations without owning a shop",
+      "Starbucks-scale operators"
     ],
-    "search_guidance": "Do not hunt for people asking for the product by name. Hunt for people mid-workflow whose ingredient, tool, or process is still unset."
+    "search_guidance": "Do not hunt for people asking for inventory software. Hunt for coffee-shop owners who still personally place the weekly wholesale order and complain about guessing, copying last week, or running out."
   }
 }
