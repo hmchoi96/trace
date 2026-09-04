@@ -15,6 +15,8 @@ from signal_discovery import (
     derive_recommendation,
     discovery_context_from_profile,
     discovery_prompt,
+    discovery_channel_plan,
+    enrich_approved_candidates,
     entity_key_for,
     entity_search_fallbacks,
     export_approved_csv,
@@ -22,11 +24,13 @@ from signal_discovery import (
     identity_resolved_enough,
     import_enriched_leads,
     is_identifiable,
+    load_candidates,
     load_custom_profile,
     load_research_costs,
     parse_signal_list,
     rank_signals,
     run_discovery,
+    save_candidates,
     should_deepen,
     should_draft,
     should_enrich,
@@ -58,6 +62,9 @@ def test_akashic_and_helix_discovery_context_are_product_relative():
     assert "CJR" not in ak["what_it_does"]
     assert "on-prem" not in ak["what_it_does"].lower()
     assert "underwriting" in ak["what_it_does"].lower()
+    assert ak["signal_ontology"] == "decision_reasoning"
+    assert ak["prefer_web"] is True
+    assert "why we passed" in ak["search_guidance"].lower()
     assert hx["product_name"] == "Helix"
     assert ak["product_name"] != hx["product_name"]
     assert LIST_TO_PROFILE["helix"] == "problem_validation"
@@ -65,10 +72,123 @@ def test_akashic_and_helix_discovery_context_are_product_relative():
     prompt = discovery_prompt(ak, 3, "x")
     assert "Do not search primarily for people asking for the product" in prompt
     assert "behavior surrounding the problem" in prompt
-    assert "BEHAVIORAL_REUSE" in prompt
+    assert "RETRIEVAL" in prompt
+    assert "STORAGE-only" in prompt
+    assert "why we passed" in prompt
     assert "Older evidence is not automatically weak" in prompt
     assert "x_search" in prompt
     assert "Search ONLY X" in prompt
+    web_prompt = discovery_prompt(ak, 3, "web")
+    assert "Do NOT treat CRM usage" in web_prompt
+
+
+def test_akashic_refine_demotes_crm_storage_only():
+    from signal_discovery import refine_akashic_signal
+
+    weak = refine_akashic_signal(
+        _sig(
+            signal_text="Our CRM helps us keep track of opportunities in Salesforce.",
+            relevance="highly_relevant",
+            evidence_kind="WORKAROUND",
+        )
+    )
+    assert weak["relevance"] == "generic"
+    assert weak["evidence_kind"] == "STORAGE"
+
+    strong = refine_akashic_signal(
+        _sig(
+            signal_text=(
+                "We record why we passed and revisit that when a similar add-on shows up."
+            ),
+            relevance="relevant",
+            evidence_kind="WORKAROUND",
+        )
+    )
+    assert strong["relevance"] == "relevant"
+    assert strong["evidence_kind"] in ("REASONING_CAPTURE", "RETRIEVAL", "REUSE")
+
+
+def test_akashic_rank_prefers_reuse_over_storage():
+    storage = _sig(
+        signal_text="All deal notes live in our CRM.",
+        relevance="relevant",
+        evidence_kind="STORAGE",
+    )
+    reuse = _sig(
+        signal_text="We look back at prior IC memos when a similar deal shows up.",
+        relevance="relevant",
+        evidence_kind="RETRIEVAL",
+    )
+    ranked = rank_signals([storage, reuse])
+    assert ranked[0]["evidence_kind"] == "RETRIEVAL"
+
+
+def test_myzel_profile_uses_existing_pipeline():
+    mz = discovery_context_from_profile(PRODUCT_PROFILES["myzel"])
+    assert mz["product_name"] == "Myzel Organics"
+    assert LIST_TO_PROFILE["myzel"] == "myzel"
+    assert PRODUCT_PROFILES["myzel"]["email_mode"] == "trace_strategy_email"
+    brief = discovery_prompt(mz, 3, "web")
+    assert "Do not hunt for people asking for mushrooms" in brief
+    assert "Myzel Organics" in brief
+    assert "Helix" not in brief
+
+
+def test_myzel_pet_profile_is_pet_only():
+    pet = discovery_context_from_profile(PRODUCT_PROFILES["myzel_pet"])
+    food = discovery_context_from_profile(PRODUCT_PROFILES["myzel"])
+    assert LIST_TO_PROFILE["myzel_pet"] == "myzel_pet"
+    assert pet["product_name"] == "Myzel Organics"
+    brief = discovery_prompt(pet, 3, "web")
+    assert "This run is pet only" in brief
+    assert "group-buy" in brief
+    assert "calming chew" in brief
+    food_brief = discovery_prompt(food, 3, "web")
+    assert "Pet nutrition is a separate profile" in food_brief
+
+
+def test_oneaway_profile_is_separate_from_akashic_and_helix():
+    oa = discovery_context_from_profile(PRODUCT_PROFILES["oneaway"])
+    assert LIST_TO_PROFILE["oneaway"] == "oneaway"
+    assert oa["product_name"] == "OneAway"
+    assert oa["prefer_web"] is True
+    assert oa["search_channels"] == ["web", "x"]
+    assert oa["channel_limit_ratios"]["web"] == 1.0
+    assert oa["channel_limit_ratios"]["x"] == 0.4
+    plan = discovery_channel_plan(oa, 5)
+    assert plan[0] == ("web", 5)
+    assert plan[1] == ("x", 2)
+    brief = discovery_prompt(oa, 5, "web")
+    assert "OneAway" in brief
+    assert "outsourced outbound" in brief
+    assert "site:linkedin.com" in brief
+    assert "Helix" not in brief
+    assert "Akashic" not in brief
+    assert "Myzel" not in brief
+    assert PRODUCT_PROFILES["oneaway"]["email_mode"] == "trace_strategy_email"
+
+
+def test_rank_prefer_web_puts_company_page_ahead_of_x():
+    web = _sig(
+        source="web",
+        source_url="https://example.com/jobs",
+        author_name="Pat Lee",
+        published_at="2026-08-01",
+        signal_text="hiring first SDR",
+        evidence_kind="COMPANY_TRIGGER",
+        relevance="relevant",
+    )
+    tweet = _sig(
+        source="x",
+        source_url="https://x.com/a/99",
+        author_name="Pat Lee",
+        published_at="2026-08-01",
+        signal_text="hiring first SDR",
+        evidence_kind="COMPANY_TRIGGER",
+        relevance="relevant",
+    )
+    ranked = rank_signals([tweet, web], prefer_web=True)
+    assert ranked[0]["source"] == "web"
 
 
 def test_custom_product_config(tmp_path):
@@ -755,4 +875,133 @@ def test_evidence_kind_families_normalize():
     }))
     assert items[0]["evidence_kind"] == "BEHAVIORAL_REUSE"
     assert items[1]["evidence_kind"] == "WORKAROUND"
+
+
+def test_enrich_approved_attaches_apollo_email_only_to_approved():
+    prospect = build_candidate(
+        signal=_sig(source_url="https://x.com/a/1", signal_text="one"),
+        person={"name": "Jane Doe", "title": "VP", "company": "Acme",
+                "linkedin_url": "https://linkedin.com/in/jane"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    pending = build_candidate(
+        signal=_sig(source_url="https://x.com/b/2", signal_text="two"),
+        person={"name": "Pat Lee", "title": "Principal", "company": "Fund"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    apply_human_decision([prospect], prospect["candidate_id"], "APPROVED")
+
+    def matcher(details, **kwargs):
+        assert kwargs.get("reveal_personal_emails") is True
+        assert kwargs.get("reveal_phone_number") is False
+        assert details[0]["linkedin_url"]
+        return {"matches": [{"email": "jane@acme.com", "title": "VP Sales"}]}
+
+    n = enrich_approved_candidates([prospect, pending], matcher=matcher, progress=None)
+    assert n == 1
+    assert prospect["email"] == "jane@acme.com"
+    assert prospect["email_found"] is True
+    assert pending["email"] == ""
+    assert pending.get("enrichment_attempted") is not True
+
+
+def test_enrich_approved_falls_back_to_hunter(monkeypatch):
+    prospect = build_candidate(
+        signal=_sig(source_url="https://x.com/a/1", signal_text="one"),
+        person={"name": "Jane Doe", "title": "VP", "company": "Acme",
+                "linkedin_url": "https://linkedin.com/in/jane"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    apply_human_decision([prospect], prospect["candidate_id"], "APPROVED")
+    monkeypatch.setenv("HUNTER_API_KEY", "test-hunter")
+
+    def matcher(details, **kwargs):
+        return {"matches": [None]}
+
+    def hunter_finder(rec):
+        assert rec["name"] == "Jane Doe"
+        return {"email": "jane@acme.com"}
+
+    n = enrich_approved_candidates(
+        [prospect],
+        matcher=matcher,
+        hunter_finder=hunter_finder,
+        progress=None,
+    )
+    assert n == 1
+    assert prospect["email"] == "jane@acme.com"
+    assert prospect["email_source"] == "Hunter.io"
+
+
+def test_interactive_review_approve_reject_skip(tmp_path, monkeypatch):
+    from main import _run_interactive_review
+
+    approved_src = build_candidate(
+        signal=_sig(source_url="https://x.com/a/1", signal_text="one"),
+        person={"name": "Jane Doe", "title": "VP", "company": "Acme"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    rejected_src = build_candidate(
+        signal=_sig(source_url="https://x.com/b/2", signal_text="two"),
+        person={"name": "Pat Lee", "title": "Principal", "company": "Fund"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    skipped_src = build_candidate(
+        signal=_sig(source_url="https://x.com/c/3", signal_text="three"),
+        person={"name": "Sam Kim", "title": "AE", "company": "Co"},
+        actor_type="PRACTITIONER",
+        recommendation="LIKELY_PROSPECT",
+        recommendation_reason="ok",
+        list_name="helix",
+        profile_key="problem_validation",
+        product_name="Helix",
+    )
+    path = tmp_path / "cands.jsonl"
+    save_candidates(str(path), [approved_src, rejected_src, skipped_src])
+    answers = iter(["a", "r", "vendor", "s"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    n = _run_interactive_review(str(path))
+    assert n == 1
+    by_name = {r["name"]: r for r in load_candidates(str(path))}
+    assert by_name["Jane Doe"]["human_status"] == "APPROVED"
+    assert by_name["Pat Lee"]["human_status"] == "REJECTED"
+    assert by_name["Pat Lee"]["human_reject_reason"] == "vendor"
+    assert by_name["Sam Kim"]["human_status"] == "PENDING"
+
+
+def test_prompt_yes_no_defaults(monkeypatch):
+    from main import _prompt_yes_no
+
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    assert _prompt_yes_no("go?", default=True) is True
+    assert _prompt_yes_no("go?", default=False) is False
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    assert _prompt_yes_no("go?", default=False) is True
+
+
 

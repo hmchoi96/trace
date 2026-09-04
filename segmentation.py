@@ -414,8 +414,9 @@ def pb_body_length_analysis(
 ) -> dict[str, Any]:
     """
     Deterministic word count and band. Does not use Claude.
-    Default bands: target (45–65), warning (66–75), hard_fail (>75), short (<45).
-    Strategy mode may pass a higher warn_hi (e.g. 130).
+    Default bands: target (>=target_lo), warning (66–75 when warn_hi=75),
+    hard_fail (>warn_hi), short (<target_lo).
+    Soft aims differ by template; warn_hi is the hard ceiling (normally 75).
     """
     counted = extract_pb_counted_prose(body, first_name)
     n = len(re.findall(r"\S+", counted)) if counted else 0

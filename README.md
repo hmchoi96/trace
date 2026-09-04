@@ -4,7 +4,48 @@ A tool for people who do not want to write every cold email by hand.
 
 You describe the product once. Trace finds **people who are living with that problem right now** and drafts the email. You always decide whether it actually sends.
 
-You do not need to be a developer. Paste the commands below into the terminal. Change only the file names to yours.
+There are two ways to use it: **the app** (a local web UI) and **the terminal**. Both drive the same engine.
+
+---
+
+## Run the app
+
+One-time, after the setup section below:
+
+```bash
+pip install -r requirements.txt
+cd web && npm install && cd ..
+```
+
+Then:
+
+```bash
+./scripts/dev.sh
+```
+
+- App: http://localhost:3000
+- API: http://localhost:8000
+
+The app keeps its state in `runs/trace_app.db`. Research output is still written to `runs/` as JSONL so nothing is lost if you go back to the terminal.
+
+### What the app enforces
+
+- A **profile** is one unit: the product, who to look for, the email template, the sender, and the from address. A hunt freezes that profile, and every later step runs against the frozen copy. A person found for one product can never be sent another product's email.
+- Contacts are looked up **only after you say yes**. No address is invented.
+- A draft that did not clear the quality check cannot be sent.
+- Clicking send twice sends once.
+- If the connected mailbox is not the profile's sender, Trace refuses to send.
+
+### Email templates
+
+Each profile has a default, and you can switch per draft:
+
+| Template | What it sounds like |
+|----------|--------------------|
+| Value-First Outreach | Value exchange first. The default for most profiles. |
+| Short Discovery | Short peer note, then one focused question. |
+| Cautious Hypothesis | Deliberately unpolished. One careful guess. |
+| Research-Led Discovery | Research-grounded question; no product pitch. |
 
 ---
 
@@ -83,7 +124,9 @@ The point: **do not ask Trace to find people looking for your product.** Ask it 
 
 ---
 
-## How to run it
+## How to run it from the terminal
+
+The app above covers the same steps. Use these when you want to script a run or debug the engine.
 
 The output file name is different every time. The terminal prints the path at the end. **Copy that path** into the `runs/signals_....jsonl` slot in the next command.
 

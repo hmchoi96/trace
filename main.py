@@ -48,6 +48,7 @@ from signal_discovery import (
     apply_human_decision,
     candidate_to_lead,
     discovery_context_from_profile,
+    enrich_approved_candidates,
     export_approved_csv,
     format_review_card,
     format_signal_evidence_block,
@@ -61,15 +62,33 @@ from signal_discovery import (
     should_enrich,
     signal_jsonl_fields,
 )
+from trace_drafting import (
+    enrich_lead_from_candidate,
+    format_drafting_context_package,
+    format_trace_critique_context,
+    legacy_outreach_angle,
+    outreach_ask_guidance,
+)
 from trace_strategy_prompt import (
     build_trace_strategy_sender_block,
     build_trace_strategy_system_prompt,
     draft_strategy_jsonl_fields,
     normalize_trace_strategy_draft,
 )
+from trace_first_touch import (
+    FIRST_TOUCH_WORD_MAX,
+    with_first_touch_critique_checks,
+    with_first_touch_rules,
+)
+from trace_style_prompts import (
+    CRITIQUE_PLAIN_TEMPLATE,
+    CRITIQUE_SHORT_TEMPLATE,
+    DRAFTING_PLAIN_TEMPLATE,
+    DRAFTING_SHORT_TEMPLATE,
+)
 
 # Strategy-mode counted-body hard limit (greeting + sign-off excluded)
-TRACE_STRATEGY_WORD_WARN_HI = 130
+TRACE_STRATEGY_WORD_WARN_HI = FIRST_TOUCH_WORD_MAX
 
 load_dotenv()
 
@@ -82,14 +101,59 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 SENDER_FIRST_NAME = os.getenv("SENDER_FIRST_NAME", "Jamie")
+SENDER_FULL_NAME = os.getenv("SENDER_FULL_NAME", "Hyunmyung Choi")
+SENDER_COMPANY = os.getenv("SENDER_COMPANY", "Wiserbond Technologies Inc.")
 
 
-def build_pb_sign_off() -> str:
-    return f"{SENDER_FIRST_NAME}\nbuilding Helix"
+def build_wiserbond_sign_off(profile: dict | None = None) -> str:
+    """Two-line sign-off: full name, then company. No em dash."""
+    if profile and str(profile.get("sign_off") or "").strip():
+        raw = str(profile["sign_off"]).strip().lstrip("—–-").strip()
+        if "\n" in raw:
+            return raw
+        if "," in raw:
+            parts = [p.strip() for p in raw.split(",", 1)]
+            if len(parts) == 2:
+                return f"{parts[0]}\n{parts[1]}"
+        return raw
+    return f"{SENDER_FULL_NAME}\n{SENDER_COMPANY}"
 
 
-def _pb_sign_off_body_acceptable(body: str) -> bool:
-    """Lenient check: last non-empty lines look like FirstName + building Helix / Helix by Wiserbond."""
+def build_pb_sign_off(profile: dict | None = None) -> str:
+    if profile and str(profile.get("sign_off") or "").strip():
+        return str(profile["sign_off"]).strip()
+    if profile and _is_helix_profile(profile):
+        return f"{SENDER_FIRST_NAME}\nbuilding Helix"
+    return build_wiserbond_sign_off(profile)
+
+
+def _effective_email_mode(profile: dict | None) -> str:
+    if not profile:
+        return "legacy_email"
+    mode = str(profile.get("email_mode") or "").strip()
+    if mode:
+        return mode
+    if profile.get("profile_kind") == "legacy":
+        return "legacy_email"
+    return "problem_validation_email"
+
+
+def _uses_template_draft_path(profile: dict | None) -> bool:
+    return _effective_email_mode(profile) != "legacy_email"
+
+
+def _is_helix_profile(profile: dict | None) -> bool:
+    if not profile:
+        return False
+    return str(profile.get("product_name") or "").strip().lower() == "helix"
+
+
+def _pb_sign_off_body_acceptable(body: str, sign_off: str | None = None) -> bool:
+    """Last lines match the active profile sign-off when provided; else Helix legacy forms."""
+    from trace_eval import body_matches_sign_off, sign_off_lines
+
+    if sign_off and sign_off_lines(sign_off):
+        return body_matches_sign_off(body, sign_off)
     lines = [ln.strip() for ln in body.replace("\r\n", "\n").split("\n") if ln.strip()]
     if len(lines) < 2:
         return False
@@ -100,9 +164,45 @@ def _pb_sign_off_body_acceptable(body: str) -> bool:
         "helix by wiserbond",
         "helix (by wiserbond)",
     )
-    # First line: plausible given name (not enforcing a single name)
     first_ok = 1 <= len(line1) <= 40 and not line1.lower().startswith("http")
     return bool(second_ok and first_ok)
+
+
+def _sign_off_lines(sign_off: str) -> list[str]:
+    return [
+        ln.strip()
+        for ln in sign_off.replace("\r\n", "\n").strip().split("\n")
+        if ln.strip()
+    ]
+
+
+def _body_has_sign_off(body: str, sign_off: str) -> bool:
+    body_lines = [
+        ln.strip()
+        for ln in body.replace("\r\n", "\n").strip().split("\n")
+        if ln.strip()
+    ]
+    sign_lines = _sign_off_lines(sign_off)
+    if not sign_lines or len(body_lines) < len(sign_lines):
+        return False
+    return body_lines[-len(sign_lines):] == sign_lines
+
+
+def _draft_sign_off(profile: dict | None) -> str:
+    if profile and _uses_template_draft_path(profile):
+        return build_pb_sign_off(profile)
+    return build_wiserbond_sign_off(profile)
+
+
+def ensure_draft_sign_off(email: dict, profile: dict | None) -> dict:
+    """Append the profile sign-off when the model omitted it."""
+    sign_off = _draft_sign_off(profile)
+    body = str(email.get("body") or "").rstrip()
+    if not body or _body_has_sign_off(body, sign_off):
+        return email
+    out = dict(email)
+    out["body"] = body + "\n\n" + sign_off.strip()
+    return out
 
 
 def _is_claude_length_hard_fail(msg: str) -> bool:
@@ -141,6 +241,8 @@ def merge_pb_hard_fails_with_local_length(
     hard_fails: list[str],
     *,
     warn_hi: int | None = None,
+    helix: bool = False,
+    required_sign_off: str = "",
 ) -> tuple[list[str], dict]:
     """
     Sign-off noise strip, then align length hard fails with deterministic count.
@@ -152,6 +254,10 @@ def merge_pb_hard_fails_with_local_length(
     out = strip_pb_signoff_noise_hard_fails(
         body,
         [str(x) for x in hard_fails if x],
+        sign_off=required_sign_off or None,
+    )
+    out = strip_cross_product_signoff_hard_fails(
+        out, helix=helix, required_sign_off=required_sign_off
     )
     out = [h for h in out if not (n <= limit and _is_claude_length_hard_fail(h))]
     out = [h for h in out if not _is_deterministic_length_hard_fail(h)]
@@ -165,8 +271,8 @@ def merge_pb_hard_fails_with_local_length(
 
 
 def _length_json_fields(profile: dict, lead: dict, body: str | None) -> dict:
-    """Deterministic length fields for JSONL (problem_validation only)."""
-    if profile.get("profile_kind") != "problem_validation" or not body:
+    """Deterministic length fields for JSONL (template draft modes only)."""
+    if not _uses_template_draft_path(profile) or not body:
         return {}
     m = pb_body_length_analysis(
         body,
@@ -180,9 +286,14 @@ def _length_json_fields(profile: dict, lead: dict, body: str | None) -> dict:
     }
 
 
-def strip_pb_signoff_noise_hard_fails(body: str, hard_fails: list[str]) -> list[str]:
+def strip_pb_signoff_noise_hard_fails(
+    body: str,
+    hard_fails: list[str],
+    *,
+    sign_off: str | None = None,
+) -> list[str]:
     """Do not burn revise attempts on brittle sign-off whitespace mismatches."""
-    if not _pb_sign_off_body_acceptable(body):
+    if not _pb_sign_off_body_acceptable(body, sign_off=sign_off):
         return [str(x) for x in hard_fails if x]
     out: list[str] = []
     for h in hard_fails:
@@ -193,6 +304,27 @@ def strip_pb_signoff_noise_hard_fails(body: str, hard_fails: list[str]) -> list[
             continue
         out.append(str(h))
     return out
+
+
+def strip_cross_product_signoff_hard_fails(
+    hard_fails: list[str],
+    *,
+    helix: bool = False,
+    required_sign_off: str = "",
+) -> list[str]:
+    """Drop sign-off complaints that belong to a different product than this profile."""
+    from trace_eval import strip_foreign_signoff_hard_fails
+
+    if required_sign_off:
+        return strip_foreign_signoff_hard_fails(
+            hard_fails, required_sign_off=required_sign_off
+        )
+    # Legacy Helix flag path for older callers/tests.
+    if helix:
+        return [str(x) for x in hard_fails if x]
+    return strip_foreign_signoff_hard_fails(
+        hard_fails, required_sign_off="Jamie\nWiserbond Technologies Inc."
+    )
 
 
 # ─── Lead Sourcing ──────────────────────────────────────────────────────────
@@ -284,17 +416,33 @@ def load_leads_from_csv(filepath: str) -> list[dict]:
 PRODUCT_PROFILES = {
     "akashic": {
         "profile_kind": "legacy",
-        "product_name": "Wiserbond",
+        "product_name": "Akashic Record",
         "product_context": (
-            "Wiserbond solves Corporate Amnesia: past judgments, reasoning, "
-            "and decision context vanish as people leave and documents "
-            "scatter. We structure those lost decisions into reusable "
-            "memory. We extract Condition (what was happening), Judgment "
-            "(what was decided), and Reasoning (why) from internal docs "
-            "and records. Local first, on prem deployable. Not a search "
-            "tool or chatbot."
+            "Akashic Record (by Wiserbond Technologies Inc.) helps investment "
+            "teams reuse their own underwriting and decision history when a "
+            "new deal comes up: how similar risks were handled, why the team "
+            "got comfortable or passed, what assumptions were made, and what "
+            "is different this time. Local first, on-prem deployable. Not a "
+            "search tool or chatbot."
         ),
-        "sign_off": "— Hyunmyung, Wiserbond",
+        "sign_off": "Hyunmyung Choi\nWiserbond Technologies Inc.",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: Hyunmyung Choi\n"
+            "- Company: Wiserbond Technologies Inc.\n"
+            "- Product: Akashic Record\n"
+            "- Current work: structuring past investment judgments, reasoning, and "
+            "decision context into reusable institutional memory for PE and "
+            "private-market teams\n"
+            "- Desired outcome: validate whether the decision-memory / IC memo reuse "
+            "problem is real and whether Trace's read of the signal matches what "
+            "practitioners and researchers observe\n"
+            "- Recipient value: a thoughtful question grounded in their public research "
+            "or workflow, not a product pitch\n"
+            "- Constraints: no fabricated customers or metrics; Trace research package "
+            "only; do not treat researchers as IC workflow owners\n"
+            "=== end sender ==="
+        ),
         "discovery": {
             "product_name": "Akashic Record",
             "what_it_does": (
@@ -325,7 +473,8 @@ PRODUCT_PROFILES = {
                 "The person who remembered that deal left and the context went with them",
                 "We're doing the same analysis again from scratch",
                 "I don't know where the old underwriting assumptions live",
-                "We use the CRM to see why we passed and whether that was the right call",
+                "We record why we passed and revisit that when a similar deal shows up",
+                "We look back at prior IC memos and compare assumptions to what actually happened",
                 "That experience became a playbook for later similar situations",
                 "A lot of it is pattern recognition from prior investments",
                 "We went back to how we handled a similar deal",
@@ -336,7 +485,65 @@ PRODUCT_PROFILES = {
                 "Consultants or commentators describing the problem without owning the workflow",
                 "Generic 'AI will transform PE' commentary",
                 "People asking for 'institutional memory', 'decision memory', 'CJR', or 'on-prem AI' as a product category",
+                "Generic CRM usage with no sign they preserve, retrieve, or reuse prior decision reasoning",
             ],
+            "qualification_question": (
+                "Does this person show that past investment judgments, assumptions, or "
+                "reasoning are preserved, retrieved, compared, revised, or evaluated "
+                "when a similar decision comes up again?"
+            ),
+            "search_guidance": (
+                "Find the behavior around prior decision reasoning — not CRM as an object.\n"
+                "Do NOT treat CRM usage, document storage, knowledge bases, or "
+                "'institutional memory' slogans by themselves as evidence.\n"
+                "CRM mentions are weak unless they include why a past judgment was made, "
+                "how it is retrieved for a similar deal, or how outcomes were checked later.\n\n"
+                "Search behavior-first. Prefer first-person operational language:\n"
+                "- why we passed / why we got comfortable\n"
+                "- revisit past deals / look back at old deals\n"
+                "- previous investment memo / IC memo / underwriting assumptions\n"
+                "- performance vs original assumptions / actual vs expectations\n"
+                "- similar add-on / we've seen this movie before / pattern recognition\n"
+                "- when the partner left, context disappeared\n"
+                "- that became our playbook / lessons learned from the last one\n\n"
+                "Avoid making these primary search queries (they surface HubSpot/Salesforce noise):\n"
+                "CRM, deal history, knowledge base, institutional memory, Dynamo, Salesforce.\n"
+                "Use them only if paired with reasoning behavior in the same query."
+            ),
+            "search_query_examples": [
+                '"why we passed" investment deal private equity',
+                '"revisit past deals" private equity',
+                '"previous investment memo" similar opportunity',
+                '"original underwriting assumptions" actual performance',
+                '"investment committee" why we got comfortable',
+                '"look back at old deals" growth equity',
+                '"what we thought at underwriting" performance',
+                '"past investment decisions" lessons learned',
+                '"when the partner left" deal context disappeared',
+                '"pattern recognition" prior investments',
+            ],
+            "signal_ontology": "decision_reasoning",
+            "evidence_families": (
+                "Akashic signal ladder — rank by reasoning depth, not storage:\n"
+                "1. STORAGE (weak alone) — where notes/files/CRM records live; "
+                "'we use Salesforce', 'deal history in CRM', 'knowledge base'. "
+                "Do NOT promote unless paired with reasoning below.\n"
+                "2. REASONING_CAPTURE — they record why a judgment was made: "
+                "'why we passed', 'why IC got comfortable', 'log the rationale'.\n"
+                "3. RETRIEVAL — they find prior judgments for a similar situation: "
+                "'look back at old deals', 'open the prior memo', 'search old IC decks'.\n"
+                "4. REUSE — prior reasoning changes the next decision: "
+                "'playbook from last time', 'pattern recognition', 'we handled a similar deal by…'.\n"
+                "5. OUTCOME_FEEDBACK — they check whether a prior call was right: "
+                "'actual vs original assumptions', 'were we right to pass', postmortem.\n"
+                "6. CONTINUITY — reasoning survives people leaving: "
+                "'when the partner left the context went with them', onboarding off prior work.\n\n"
+                "Minimum bar for Akashic: at least REASONING_CAPTURE plus RETRIEVAL or REUSE. "
+                "STORAGE-only signals are generic, not highly_relevant."
+            ),
+            "search_channels": ["web", "x"],
+            "channel_limit_ratios": {"web": 1.0, "x": 0.35},
+            "prefer_web": True,
         },
         "angles": {
             "senior": (
@@ -395,6 +602,24 @@ PRODUCT_PROFILES = {
         ),
         # sign_off filled at draft time via build_pb_sign_off()
         "sign_off": "",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: use sign-off first line\n"
+            "- Company: Wiserbond\n"
+            "- Product: Helix\n"
+            "- Current work: building Helix while doing founder-led outbound\n"
+            "- Relevant system built: outbound workflow using Apollo list data, Claude "
+            "draft + critique, and Outlook send\n"
+            "- UVP: one tap surfaces the right script line mid-call so reps stop "
+            "scrolling a long Google Doc and can listen to the prospect\n"
+            "- Honest scope: reduces early-ramp execution friction; does not claim to "
+            "magically improve tone, timing, or ad-lib skill\n"
+            "- Desired outcome: a low-friction reply validating whether mid-call script "
+            "search / cognitive load is a real pain\n"
+            "- Constraints: no fabricated customers or metrics; Trace research package "
+            "only; do not overclaim vs Gong/Chorus/Balto\n"
+            "=== end sender ==="
+        ),
         "discovery": {
             "product_name": "Helix",
             "what_it_does": (
@@ -428,6 +653,294 @@ PRODUCT_PROFILES = {
             ],
         },
     },
+    "myzel": {
+        "profile_kind": "problem_validation",
+        "email_mode": "trace_strategy_email",
+        "product_name": "Myzel Organics",
+        "product_context": (
+            "Myzel Organics (internal; do not dump the whole brief into the email).\n"
+            "\n"
+            "WHAT WE SUPPLY: Canadian-grown organic functional mushroom powders "
+            "(Lion's Mane, Reishi, Cordyceps, and others) that brands add to food, "
+            "beverage, or supplement formulations.\n"
+            "\n"
+            "WHO TO WRITE: R&D / product development / innovation / formulation / "
+            "ingredient sourcing at North American SMB-to-midsize protein, functional "
+            "beverage, coffee/RTD, supplement, or healthy snack/bar brands. Prefer a "
+            "handful of companies Markus would actually sell. Skip Nestlé-scale CPG.\n"
+            "\n"
+            "TRIGGER TO INFER: they are exploring a new functional product or "
+            "differentiating a current line (protein + functional positioning + new "
+            "formulation). Do not wait for them to ask for mushrooms. Do not write as "
+            "if they already chose a mushroom ingredient.\n"
+            "\n"
+            "EMAIL SHAPE: one observed expansion/concept (from FACTS only) → we grow "
+            "organic functional mushrooms in Ontario and supply powders for "
+            "formulations → one low-friction ask for samples/specs. Sound like a "
+            "person, not like software found them.\n"
+            "\n"
+            "Never invent customers, launches, or metrics. If you name the company, "
+            "call it Myzel Organics."
+        ),
+        "sign_off": "Markus\nMyzel Organics",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: Markus\n"
+            "- Company: Myzel Organics\n"
+            "- Current work: Ontario-grown organic functional mushroom powders for "
+            "food, beverage, and supplement formulations\n"
+            "- Ingredients: Lion's Mane, Reishi, Cordyceps, and other mushroom powders\n"
+            "- Desired outcome: a samples/specs conversation with R&D or product development\n"
+            "- Recipient value: an ingredient option for a functional product they are "
+            "already exploring, not a pitch that they need mushrooms\n"
+            "- Constraints: no fabricated customers or metrics; Apollo FACTS only; "
+            "do not claim they already chose mushrooms; do not write like AI found them\n"
+            "=== end sender ==="
+        ),
+        "discovery": {
+            "product_name": "Myzel Organics",
+            "what_it_does": (
+                "Supplies Canadian-grown organic functional mushroom powders that brands "
+                "can add to food, beverage, or supplement products to create differentiated "
+                "functional or wellness SKUs."
+            ),
+            "target_users_or_buyers": (
+                "R&D, product development, innovation, formulation, and ingredient sourcing "
+                "people at North American SMB-to-midsize protein/nutrition, functional "
+                "beverage, coffee/RTD, supplement, and healthy snack/bar brands. "
+                "A few real-fit companies beat a long list of Nestlé-scale names."
+            ),
+            "problems_it_solves": [
+                "Want to launch something new in functional nutrition but still exploring concepts",
+                "Looking for new ingredients for a protein powder or RTD",
+                "Trying to differentiate a current product line",
+                "Exploring adaptogens, cognitive wellness, energy, immunity, or gut-health claims",
+                "Testing new product concepts with creators/influencers",
+            ],
+            "examples_of_problem_signals": [
+                "We want to launch something new in functional nutrition, but we're still exploring concepts",
+                "Looking for new ingredients for a protein powder / RTD",
+                "Trying to differentiate our current product line",
+                "Exploring adaptogens, cognitive wellness, energy, immunity, gut health, or other functional claims",
+                "Testing new product concepts with creators/influencers",
+            ],
+            "obvious_non_targets_or_adjacent_vendors": [
+                "People already shopping for Lion's Mane / Reishi / mushroom powders as the ingredient",
+                "Mushroom, adaptogen, or functional-ingredient vendors selling into the same buyers",
+                "Nestlé / Pepsi / Coke-scale CPG where Myzel is not a realistic first customer",
+                "Generic wellness thought leadership with no live product-development work",
+            ],
+            "search_guidance": (
+                "Do not hunt for people asking for mushrooms. Hunt for people who have not "
+                "locked an ingredient yet and are building a new functional food, beverage, "
+                "protein, or supplement product. Protein + functional positioning + "
+                "new formulation is enough to infer Myzel could fit. Prefer named R&D / "
+                "product-development people at North American SMB-to-midsize brands. "
+                "Pet nutrition is a separate profile; do not spend this run on pet."
+            ),
+        },
+    },
+    "myzel_pet": {
+        "profile_kind": "problem_validation",
+        "email_mode": "trace_strategy_email",
+        "product_name": "Myzel Organics",
+        "product_context": (
+            "Myzel Organics pet run (internal; do not dump the whole brief into the email).\n"
+            "\n"
+            "WHAT WE SUPPLY: Canadian-grown organic functional mushroom powders "
+            "for pet food, treats, toppers, chews, and pet supplements.\n"
+            "\n"
+            "WHO TO WRITE: (1) R&D / product development / innovation / formulation "
+            "at North American SMB-to-midsize pet food or pet supplement brands. "
+            "(2) Marketing or creator-commerce shops that run short influencer "
+            "group-buys / drops to test demand for a pet SKU, then sell a batch. "
+            "(3) Formulation houses building those SKUs. Skip Purina / Mars-scale.\n"
+            "\n"
+            "TRIGGER TO INFER: a new calming chew, senior-dog cognition line, "
+            "functional topper, gut/immunity/healthy-aging treat is in development "
+            "and the functional ingredient is not locked. Do not wait for them to "
+            "ask for mushrooms.\n"
+            "\n"
+            "EMAIL SHAPE: one observed pet-product concept (from FACTS only) → "
+            "Ontario-grown organic mushroom powders for pet formulations → "
+            "samples/specs. Sound like a person, not like software found them.\n"
+            "\n"
+            "Never invent customers, launches, or metrics. Call the company "
+            "Myzel Organics."
+        ),
+        "sign_off": "Markus\nMyzel Organics",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: Markus\n"
+            "- Company: Myzel Organics\n"
+            "- Current work: Ontario-grown organic functional mushroom powders; "
+            "pet food is currently the largest share of sales\n"
+            "- Ingredients: Lion's Mane, Reishi, Cordyceps, and other mushroom powders "
+            "for pet chews, toppers, treats, and supplements\n"
+            "- Desired outcome: a samples/specs conversation with pet R&D, a "
+            "formulator, or a creator-commerce shop testing a pet SKU\n"
+            "- Recipient value: a functional ingredient option for a pet product "
+            "they are already exploring or demand-testing\n"
+            "- Constraints: no fabricated customers or metrics; Apollo FACTS only; "
+            "do not claim they already chose mushrooms; do not write like AI found them\n"
+            "=== end sender ==="
+        ),
+        "discovery": {
+            "product_name": "Myzel Organics",
+            "what_it_does": (
+                "Supplies Canadian-grown organic functional mushroom powders that pet "
+                "food and pet supplement brands add to chews, toppers, treats, powders, "
+                "and other functional pet SKUs."
+            ),
+            "target_users_or_buyers": (
+                "R&D, product development, innovation, and formulation people at North "
+                "American SMB-to-midsize pet food / pet supplement brands. Also marketing "
+                "or influencer-commerce shops that gather demand with short creator "
+                "group-buys or live drops, then sell a limited pet SKU. Formulation "
+                "houses building those products count. A few real-fit companies beat "
+                "Purina-scale names."
+            ),
+            "problems_it_solves": [
+                "Developing a new dog chew, topper, powder, or treat and still choosing the functional ingredient",
+                "Adding cognitive support to a senior-dog line",
+                "Launching a calming, gut-health, immunity, or healthy-aging pet SKU without a locked formula",
+                "Wanting a functional topper but the formula is not finalized",
+                "Marketing or creator shops testing a pet product concept with a short influencer group-buy or drop before committing to a full formula",
+            ],
+            "examples_of_problem_signals": [
+                "We're developing a new calming chew and testing different functional ingredients",
+                "Looking at ways to add cognitive support to our senior dog line",
+                "We want to launch a functional topper but haven't finalized the formula",
+                "Testing a new pet treat concept with creators / running a group buy to see if demand is real",
+                "Formulating a pet supplement for gut health / immunity / healthy aging and still comparing actives",
+            ],
+            "obvious_non_targets_or_adjacent_vendors": [
+                "People already shopping for Lion's Mane / Reishi pet powders as the locked ingredient",
+                "Mushroom or pet-ingredient vendors selling into the same buyers",
+                "Purina / Mars / Nestlé Purina-scale pet CPG",
+                "Generic pet-wellness commentary with no live product or demand-test work",
+                "Human food/supplement R&D with no pet SKU (that is the other Myzel profile)",
+            ],
+            "search_guidance": (
+                "This run is pet only. Do not hunt for people asking for mushrooms. "
+                "Hunt for people at a real pet nutrition company, or at a marketing/"
+                "creator-commerce shop, who are making or demand-testing a new pet "
+                "product and have not locked the functional ingredient. Need all three: "
+                "pet company or pet-SKU tester + new product in motion + ingredient "
+                "unset. Group-buy / influencer drop / 'we tested demand with creators' "
+                "is in-scope if the SKU is pet. Prefer named North American SMB-to-midsize "
+                "people. Skip this run's human food and RTD work."
+            ),
+        },
+    },
+    "oneaway": {
+        "profile_kind": "problem_validation",
+        "email_mode": "trace_strategy_email",
+        "product_name": "OneAway",
+        "product_context": (
+            "OneAway (internal; do not dump the whole brief into the email).\n"
+            "\n"
+            "WHAT IT IS: A B2B outbound agency. Cold email, LinkedIn DMs, "
+            "appointment setting, and GTM engineering / workflow automation "
+            "for companies that need pipeline and do not yet have a mature "
+            "in-house outbound engine.\n"
+            "\n"
+            "WHO TO WRITE: Founder, CEO, Head/VP of Sales, Head of Growth, "
+            "CRO, RevOps or GTM lead at a B2B SaaS / tech company. Prefer a "
+            "company that is hiring SDRs, just raised, entering a new market, "
+            "still founder-led on outbound, or talking about pipeline / Clay / "
+            "Apollo / HubSpot as an unfinished GTM stack. Skip other agencies, "
+            "GTM consultants, sales coaches, and companies that already run a "
+            "large SDR org with a mature outbound engine.\n"
+            "\n"
+            "TRIGGER TO INFER: they need outsourced outbound or GTM engineering "
+            "now. They do not need to have asked for an agency.\n"
+            "\n"
+            "EMAIL SHAPE: one observed company trigger (from FACTS only) → "
+            "OneAway runs outbound + GTM workflow for teams in that spot → "
+            "one low-friction ask. Sound like a person, not like software "
+            "found them.\n"
+            "\n"
+            "Never invent customers, pipeline numbers, or retainers. If you "
+            "name the company, call it OneAway."
+        ),
+        "sign_off": "Hyunmyung Choi\nWiserbond Technologies Inc.",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: Hyunmyung Choi\n"
+            "- Company: Wiserbond Technologies Inc.\n"
+            "- Current work: B2B outbound agency — cold email, LinkedIn DM, "
+            "appointment setting, GTM engineering / workflow automation\n"
+            "- Desired outcome: a conversation about whether outsourced outbound "
+            "or GTM engineering would help their pipeline this quarter\n"
+            "- Recipient value: pipeline without standing up a full SDR org yet\n"
+            "- Constraints: no fabricated customers or metrics; public FACTS only; "
+            "do not claim they asked for an agency; do not write like AI found them\n"
+            "=== end sender ==="
+        ),
+        "discovery": {
+            "product_name": "OneAway",
+            "what_it_does": (
+                "B2B outbound agency: cold email, LinkedIn DMs, appointment setting, "
+                "and GTM engineering / workflow automation for companies that need "
+                "pipeline and do not have a mature in-house outbound engine."
+            ),
+            "target_users_or_buyers": (
+                "Founder, CEO, Head/VP of Sales, Head of Growth, CRO, RevOps, or GTM "
+                "lead at a B2B SaaS / tech company with a small or new outbound motion. "
+                "Buyers of outsourced outbound or GTM engineering, not people selling it."
+            ),
+            "problems_it_solves": [
+                "Need outbound pipeline but the SDR team is small or not built yet",
+                "Founder-led sales is becoming the bottleneck",
+                "Trying to scale outbound into a new market without a repeatable engine",
+                "Pipeline is weak or inconsistent and GTM tooling is unfinished",
+                "Hiring SDRs / AEs and still designing the outbound workflow",
+            ],
+            "examples_of_problem_signals": [
+                "We're hiring our first SDR / first AE",
+                "Just raised and need to turn that into pipeline",
+                "Launching in a new market and outbound is still founder-led",
+                "Pipeline has been inconsistent this quarter",
+                "Trying to get Clay / Apollo / HubSpot to actually run outbound",
+                "We need to get off founder-led sales",
+            ],
+            "obvious_non_targets_or_adjacent_vendors": [
+                "Other lead-gen or cold-email agencies",
+                "GTM consultants and vendors selling outbound as a product",
+                "Individual sales coaches",
+                "Companies with a large SDR org and a mature outbound engine",
+                "People asking to buy or sell 'a cold email agency' as a category",
+            ],
+            "qualification_question": (
+                "Does this company have a reason to buy outsourced outbound or "
+                "GTM engineering right now?"
+            ),
+            "search_guidance": (
+                "Do not hunt for people saying they need a cold email agency. "
+                "Hunt for B2B SaaS/tech companies whose public trail shows a "
+                "reason to buy outbound help now: SDR/AE hiring, recent funding, "
+                "new-market launch, founder still doing outbound, weak pipeline, "
+                "or GTM stack (Clay, Apollo, HubSpot) still being built. "
+                "Prefer named buyers (founder, CEO, sales/growth/CRO/RevOps). "
+                "Weight company pages, hiring posts, funding news, and LinkedIn "
+                "over Twitter chatter. Skip other agencies and mature SDR machines."
+            ),
+            "evidence_families": (
+                "A. HIRING — SDR, BDR, AE, or outbound roles opening; first sales hire.\n"
+                "B. FUNDING / EXPANSION — recent raise, new market, new ICP, new geo.\n"
+                "C. PIPELINE PAIN — inconsistent pipeline, founder still selling, "
+                "trying to leave founder-led sales.\n"
+                "D. GTM STACK — Clay, Apollo, HubSpot, or outbound workflow still "
+                "being assembled; GTM engineering mentions.\n"
+                "E. COMPANY_TRIGGER — any of the above on a company page, job post, "
+                "funding article, or LinkedIn. They do not need to ask for an agency."
+            ),
+            "search_channels": ["web", "x"],
+            "channel_limit_ratios": {"web": 1.0, "x": 0.4},
+            "prefer_web": True,
+        },
+    },
 }
 
 
@@ -435,12 +948,18 @@ LIST_TO_PROFILE = {
     "akashic": "akashic",
     "problem_validation": "problem_validation",
     "helix": "problem_validation",
+    "myzel": "myzel",
+    "myzel_pet": "myzel_pet",
+    "oneaway": "oneaway",
 }
 
 LEAD_LISTS = {
     "akashic": "akashic_record_list.csv",
     "problem_validation": "helix_list.csv",
     "helix": "helix_list.csv",
+    "myzel": "myzel_list.csv",
+    "myzel_pet": "myzel_pet_list.csv",
+    "oneaway": "oneaway_list.csv",
 }
 
 
@@ -455,27 +974,50 @@ You write first-touch cold emails for B2B discovery outreach.
 # STYLE
 1. Write as if speaking out loud to a peer, pragmatic and direct.
 2. Never start a sentence with a verb (e.g. "Noticed…", "Saw…").
-3. Never use em dashes or dashes anywhere in the subject or body. The em
-   dash inside the sign off line is the only allowed exception.
-4. Never use hollow words: "impressed", "inspiring", "admire", "fascinating",
+3. Never use em dashes (—) anywhere in the subject or body, including the sign-off.
+4. Subject lines may naturally use lowercase. Full grammatical sentences should normally
+   use standard capitalization. Short fragments may occasionally begin lowercase when
+   natural. Do not force capitalization variation mechanically.
+5. Never use hollow words: "impressed", "inspiring", "admire", "fascinating",
    "excited", "thrilled", "remarkable", "incredible", "love", "noticed".
-5. Structure: exactly 2 sentences + 1 closing question. Nothing more.
-   Keep the total body under 40 words (excluding the sign off).
-6. Subject line: under 6 words, lowercase friendly.
-7. Never label or reference the prospect's seniority level, career stage,
+6. Keep the body very short.
+   Usually 2–4 short sentences total. End with one focused question.
+   Aim for about 30–50 words. Never exceed 75 words (excluding the sign-off).
+   Do not add or remove a sentence merely to hit a fixed sentence count.
+7. Subject line: under 6 words, lowercase friendly when natural.
+8. Never label or reference the prospect's seniority level, career stage,
    or experience. Words like "early career", "junior", "new to", "as a
    young professional" are banned. Write as equal to equal.
 
 # PERSONALIZATION
-1. The email is about the PROSPECT and their likely pain, not about us.
-2. The only inputs you have about this prospect are their name, title,
-   company, and any PUBLIC SIGNAL block in the user message. Do not invent
-   posts, news, achievements, or specifics beyond that block.
-   Personalize through the SHAPE of their work (what someone with this
-   title at this company likely deals with day to day), not made-up facts.
-   If a PUBLIC SIGNAL is present, you may refer to it briefly; do not claim
-   they want to buy, asked for a solution, or overquote the source.
-3. Do not just reference their title or company name as personalization.
+1. The email is about the PROSPECT and the Trace research signal, not about us.
+2. The Trace research package in the user message is the sole basis for
+   personalization. Use verified facts, research evidence, outreach role, and
+   recommendation together. Do not invent posts, news, achievements, or specifics
+   beyond that package.
+3. Do not turn observational evidence into a claim that the recipient personally
+   experiences the problem unless Trace classification supports it.
+4. If the cited research already states a finding directly, do not ask the recipient
+   to simply confirm that same finding. Ask one level beyond the source: clarify which
+   problem mattered more, what caused it, what changed, or how the observed behavior
+   worked in practice.
+5. Do not turn Trace's interpretation into a claim about the source.
+   Avoid phrases such as "the core finding was…", "the main problem was…",
+   "this proves…" unless the source explicitly supports that characterization.
+6. Do not just reference their title or company name as personalization.
+
+# ASK PRIORITY
+Choose the closing question in this order:
+1. recommended_ask
+2. outreach_role
+3. Trace evidence
+4. question style preference below
+
+Examples of ask fit:
+- validate_problem_interpretation → open, discriminating question
+- confirm_workflow_pain → yes/no or short open question
+- find_workflow_owner_or_intro → direct role/owner question
+- low_friction_next_step → concrete CTA
 
 # QUESTION
 {question_rules}
@@ -486,8 +1028,8 @@ You write first-touch cold emails for B2B discovery outreach.
 2. Do NOT request a meeting, call, or demo.
 3. Do NOT pitch, sell, or explain what any company does.
 4. Do NOT repeat the prospect's name after the greeting.
-5. The sender signs off as "{sign_off}" which is the ONLY place
-   any company name may appear. Include this sign off verbatim.
+5. End the body with exactly these two sign-off lines (no em dash):
+{sign_off}
 
 Before outputting, ask yourself: would a busy professional reply to this?
 If not, rewrite it shorter and sharper.
@@ -497,355 +1039,81 @@ OUTPUT FORMAT — return raw JSON only, no markdown fences:
 """
 
 
-# ─── Problem-validation copy variation (opening + closing only) ─────────────
-
-# Founder openings: struggle first (no product name). Helix only in the build line.
-_PB_OPENING_FOUNDER: tuple[str, ...] = (
-    "I have been cold calling myself and the awkward part is when",
-    "I am doing founder-led outbound and keep losing the thread when",
-    "While trying to sell through cold outreach, I realized",
-    "I have been running my own outbound and it is tougher than I expected when",
-    "I am a founder doing cold calls and the friction shows up when",
-)
-
-# Sales leaders at outbound-heavy orgs: ramp / team consistency (not personal founder story)
-_PB_OPENING_SALES_LEADER: tuple[str, ...] = (
-    "When teams ramp new reps on outbound, one thing I keep seeing is",
-    "If you are trying to shorten ramp on live calls, I noticed",
-    "Talking to sales leaders about outbound, a pattern that comes up is",
-)
-
-_PB_CLOSING_FOUNDER: tuple[str, ...] = (
-    "Do you run into that too when you sell, and how do you handle the script mid-call?",
-    "Curious if that is something you have felt as well, and what you do in the moment.",
-    "Is that something you have had to figure out yourself while selling?",
-    "Do you get the same thing on calls, or have you found a way that works for you?",
-)
-
-_PB_CLOSING_SALES_LEADER: tuple[str, ...] = (
-    "Is cutting mid-call script search during ramp something you are working on right now?",
-    "Do new reps mostly learn the script from shadowing, or is there something more structured?",
-    "Do your reps still lose seconds hunting for the right line, or is that mostly solved?",
-)
-
-
-_ANTI_AI_OPENING: tuple[str, ...] = (
-    "I might be off here, but",
-    "Not sure this is actually a problem for you, but",
-    "This might be a bad read, but",
-    "I could be wrong here, but",
-)
-
-_ANTI_AI_CLOSING: tuple[str, ...] = (
-    "Worth sending?",
-    "Should I send the 3-line version?",
-    "Would an example be useful, or am I off?",
-    "Is that worth sending over?",
-)
-
-
-def _pb_slot_index(lead: dict, test_batch: str, salt: str, modulo: int) -> int:
-    key = f"{lead.get('email') or ''}|{test_batch}|{salt}"
-    h = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return int(h[:12], 16) % max(modulo, 1)
-
-
-def _anti_ai_copy_constraints_block(lead: dict, derived: dict, test_batch: str) -> str:
-    """Deterministic anti-AI voice anchors, kept separate from PB copy pools."""
-    oi = _pb_slot_index(lead, test_batch, "anti_ai_open", len(_ANTI_AI_OPENING))
-    ci = _pb_slot_index(lead, test_batch, "anti_ai_close", len(_ANTI_AI_CLOSING))
-    opening = _ANTI_AI_OPENING[oi]
-    closing = _ANTI_AI_CLOSING[ci]
-    seg = derived.get("segment") or ""
-    is_sales_leader = seg == SEG_SALES_LEADER
-
-    lines: list[str] = [
-        "=== REQUIRED ANTI-AI COPY CONSTRAINTS (this lead) ===",
+def _profile_research_constraints_block(
+    lead: dict,
+    profile: dict,
+    *,
+    style: str,
+) -> str:
+    """Product-agnostic constraints from Profile + Trace research (not style forks)."""
+    product = profile.get("product_name") or "the product"
+    role = lead.get("outreach_role") or "Practitioner"
+    ask = lead.get("recommended_ask") or ""
+    lines = [
+        "=== PROFILE + RESEARCH CONSTRAINTS ===",
         "",
-        "OPENING: The first sentence after the greeting must start with this exact phrase:",
-        f'  "{opening}"',
+        f"Product (mention at most once if needed): {product}",
+        f"Outreach role: {role}",
+        f"Recommended ask: {ask}",
         "",
-        "CLOSING QUESTION: End the body with EXACTLY this question as its own paragraph",
-        "(immediately before the two-line sign-off). Match wording and punctuation:",
-        f'  "{closing}"',
+        outreach_ask_guidance(role),
         "",
-        "ANTI-AI VOICE:",
-        "- Sound like a person making a careful guess, not a polished outbound sequence.",
-        "- Use plain words, mild uncertainty, and one concrete hypothesis.",
-        "- Do not flatter the company. Do not use SaaS words like unlock, streamline,",
-        "  transform, optimize, accelerate, elevate, empower, seamless, or game-changing.",
-        "- No meeting ask, no demo ask, no calendar ask, no feature tour.",
-        "- Keep the body a little imperfect but clear. Short beats impressive.",
+        "RULES:",
+        "- Use only Profile context and the Trace research package.",
+        "- Do not invent facts, pain, posts, hiring, funding, or metrics.",
+        f"- If you name a product, name only {product}.",
+        "- Match the closing question to outreach_role and recommended_ask.",
+        "- Do not assume cold-call / script-scroll pain unless Profile or research supports it.",
         "",
     ]
-
-    if is_sales_leader:
+    if style == "plain":
         lines.extend([
-            "SALES LEADER ANGLE:",
-            "- Make the guess about rep ramp, mid-call script search, or attention lost",
-            "  hunting for the right line instead of listening.",
-            "- Do not pretend to know their process or claim their reps struggle.",
+            "PLAIN VOICE:",
+            "- Mild uncertainty when evidence is incomplete.",
+            "- Do not force a fixed opener phrase across leads.",
+            "- Do not use generic artifact-send closings unless that is literally the ask.",
             "",
         ])
     else:
         lines.extend([
-            "FOUNDER / OPERATOR ANGLE:",
-            "- Make the guess about founder-led outbound and losing attention while",
-            "  scrolling a long script doc mid-call.",
-            "- Mention Helix at most once as something you are building, not a finished",
-            "  product they should buy.",
+            "SHORT VOICE:",
+            "- One observation, one question; optional one product line only if needed.",
             "",
         ])
-
-    lines.append("=== end anti-ai copy constraints ===")
+    lines.append("=== end profile + research constraints ===")
     return "\n".join(lines)
 
 
-def _pb_copy_constraints_block(lead: dict, derived: dict, test_batch: str) -> str:
-    """Deterministic opening + closing lines so consecutive sends look less templated."""
-    seg = derived.get("segment") or ""
-    is_sales_leader = seg == SEG_SALES_LEADER
-
-    if is_sales_leader:
-        opool = _PB_OPENING_SALES_LEADER
-        pool = _PB_CLOSING_SALES_LEADER
-        oi = _pb_slot_index(lead, test_batch, "pb_open_sl", len(opool))
-        opening = opool[oi]
-    else:
-        opool = _PB_OPENING_FOUNDER
-        pool = _PB_CLOSING_FOUNDER
-        oi = _pb_slot_index(lead, test_batch, "pb_open_f", len(opool))
-        opening = opool[oi]
-
-    ci = _pb_slot_index(lead, test_batch, "pb_close", len(pool))
-    closing = pool[ci]
-
-    lines: list[str] = [
-        "=== REQUIRED COPY CONSTRAINTS (this lead) ===",
-        "",
-        "OPENING: The first observational sentence after the greeting must follow this voice.",
-        "Start from (continue naturally in your own words):",
-        f"  «{opening} …»",
-        "",
-        "CLOSING QUESTION: End the body with EXACTLY this question as its own paragraph",
-        "(immediately before the two-line sign-off). Match wording and punctuation:",
-        f'  "{closing}"',
-        "",
-    ]
-
-    if is_sales_leader:
-        lines.extend([
-            "SALES LEADER MODE (outbound / revenue team):",
-            "- Do NOT open with your personal founder cold-calling struggle.",
-            "- Frame around team ramp, new reps hunting for script lines mid-call, or",
-            "  attention lost to search instead of listening.",
-            "- If you mention what you are building, name it: Helix (one short line, what it helps with).",
-            '  Never say "a lightweight tool" without naming Helix.',
-            "- Do NOT lecture about their industry (fleet, telematics, etc.).",
-            "",
-        ])
-    else:
-        lines.extend([
-            "FOUNDER PEER MODE:",
-            "- Write like one founder talking to another: you cold call / do outbound yourself,",
-            "  and mid-call script search steals attention from the prospect. Ask if they feel",
-            "  the same and how they handle it.",
-            "- HELIX NAMING (required if you mention the product): use the name Helix.",
-            '  Good: "I am building Helix so the right script line is one tap away mid-call."',
-            '  Bad: opening says "for Helix" then later "a lightweight tool" with no name.',
-            '  Bad: "a lightweight tool" with no name at all.',
-            "- Order: (1) your cold-call struggle, no product name, (2) one short line",
-            "  introducing Helix and what you are building it for, (3) required closing question.",
-            "- Tone: honest and curious, not a polished marketing email or industry consultant.",
-            "- Do NOT open with their industry jargon (fleet data, telematics, fraud stack, etc.)",
-            "  unless the FACTS block is explicit and you keep it to one light phrase.",
-            "- Do NOT use: shared playbook, wing it in the moment, trust-heavy industries like…,",
-            "  objections around data security or technical integration can catch you off guard.",
-            "",
-        ])
-
-    lines.append("=== end copy constraints ===")
-    return "\n".join(lines)
-
-
-# Problem-validation / founder-led discovery (not a hard sales pitch)
-
-_DRAFTING_PB_TEMPLATE = """\
-You write first-touch cold emails for B2B *problem validation*.
-
-# PRODUCT CONTEXT (internal only; do not dump all features into the email)
-{product_context}
-
-# EMAIL MODE: {email_mode}
-- **Founder / technical founder / early team / complex-product founders:** sound like
-  a founder who cold calls, loses attention hunting for the right script line mid-call,
-  is building Helix because of that, and wants to know if the reader feels the same.
-  Not consultant copy about the reader's vertical.
-- **Sales leader / revenue leader:** sound like someone curious about ramp and whether
-  new reps still burn seconds scrolling a long script doc instead of listening.
-- Calm, peer-to-peer, curious, non-accusatory. At most ONE short line about what
-  you are building (I started building / I am building Helix).
-
-# BANNED (accusatory / invented pain) — never use equivalent phrases either:
-Claims that the reader blanks, forgets, struggles, loses deals, repeats mistakes,
-that their team handles objections badly, or that their process is broken.
-Do not invent company facts. If Apollo data only suggests a context, you may
-use soft hypothesis language as YOUR observation, not their failure:
-"I noticed…", "one pattern I am seeing is…", "I am trying to understand whether…",
-"the hard part seems to be…".
-
-# CLOSING QUESTION (important)
-- The user message gives a **REQUIRED CLOSING QUESTION** for this lead: paste it
-  verbatim as the final paragraph before the sign-off (do not substitute a generic
-  "pull up the right response during the call" question).
-- Avoid implying the reader is under-prepared ("wishing you had better…").
-- Avoid repeating the same generic subject-line theme for every lead; follow the
-  REQUIRED SUBJECT for this segment from the user message.
-
-# TYPOGRAPHY
-- Do not use em dashes (—); use commas or periods instead.
-
-# COPY GUARDRAILS (first-touch only)
-- Avoid overly narrow technical jargon in the first email unless the prospect context is
-  extremely reliable. Prefer broader phrasing (e.g. "technical or integration questions")
-  instead of niche acronyms or product-specific terms inferred from weak signals.
-- Soften harsh evaluative framing. Prefer lines like "that seems easy to overlook" or
-  "that seems worth paying attention to" over blunt cost/judgment phrasing such as
-  "that seems like a costly pattern."
-- When mentioning what you are building, always say **Helix** by name (not "a lightweight
-  tool" or "a tool" alone). Prefer "I am building Helix" / "I started building Helix"
-  plus at most a few words on what it does (one-tap script line mid-call; less search,
-  more listening). Never "I built".
-- Do not name Helix in the opening struggle sentence and then refer to an unnamed tool later.
-
-# APOLLO FACTS — only trust the FACTS block in the user message. No other research.
-
-# INDUSTRY LANGUAGE
-Do not write consultant-style openers about the reader's industry (e.g. "in trust-heavy
-industries like fleet data and telematics…"). If you need context, keep it generic:
-"on live calls", "when you need the next script line", "when the prospect pushes back".
-
-# EVIDENCE — no unsupported claims about how THEY work at their company
-Never write lines like "I noticed you're handling both the technical and sales side
-at {{company}}" unless the FACTS block explicitly supports that division of labor.
-Prefer **general, role-segment framing** that does not assert: their schedule, their
-responsibilities, or how they split time. Safe patterns include:
-"As a technical founder…", "For technical founders…", "In founder-led sales…",
-"If you are involved in early sales…", "Selling {{company}}…" only when Title/role
-clearly implies selling (e.g. Founder, CEO) — not for arbitrary engineers.
-
-# STRUCTURE
-- Greet with Hi and the first name only (from FACTS).
-- For founders: struggle (no product name) → one line naming **Helix** and why you are
-  building it → required closing question. Max 2–3 sentences before the question.
-- For sales leaders: team/ramp observation, optional tool line, then required closing.
-- No feature tour. No "preload responses and click" detail in the first email.
-
-# LENGTH (the pipeline counts words deterministically: prose after “Hi {{first_name}},”
-# and before the two-line signature; blank lines do not add words).
-- Target about 45–65 words; never pad just to lengthen. Shorter is OK if natural.
-- 66–75 = warning band; over 75 is blocked by code, not by you guessing word count.
-- If the required opening and closing make the email too long, shorten the middle
-  sentence(s) first. The final body must stay at or under 75 words excluding greeting
-  and sign-off.
-
-# SUBJECT
-- Under 7 words, lowercase-friendly, not clickbait.
-- The user message gives REQUIRED SUBJECT for this segment — use that exact
-  wording (or extremely close). Do not reuse one subject line for unrelated segments.
-
-# SIGN-OFF (end of body after the question). Two lines:
-{sign_off}
-
-OUTPUT FORMAT — return raw JSON only, no markdown fences:
-{{"subject": "...", "body": "..."}}
-End with the two-line sign-off above; minor whitespace differences are acceptable.
-"""
-
-_DRAFTING_ANTI_AI_TEMPLATE = """\
-You write first-touch cold emails in the opposite style of generic AI outbound.
-
-# PRODUCT CONTEXT (internal only; do not dump all features into the email)
-{product_context}
-
-# EMAIL MODE: {email_mode}
-The goal is not to sound polished. The goal is to sound like one real person
-making a specific, low-pressure guess.
-
-# CORE SHAPE
-- Hi {{first_name}},
-- Start with the exact required uncertainty phrase from the user message.
-- One grounded observation/hypothesis based only on FACTS and DERIVED context.
-- One short line about Helix only if it helps the reader understand why you are writing.
-- End with the exact required closing question from the user message.
-- Sign off with the two-line signature below.
-
-# WHAT THIS IS NOT
-- Not a sales pitch.
-- Not consultant copy about their industry.
-- Not a compliment about their growth, mission, platform, team, funding, or innovation.
-- Not a meeting request.
-- Not a demo request.
-- Not a product tour.
-
-# PERSONALIZATION RULES
-- Use only the FACTS block and the DERIVED context in the user message.
-- Do not invent posts, news, initiatives, metrics, funding, tech stack usage, or internal process.
-- If the facts are thin, say less. A cautious guess is better than fake specificity.
-- You may use role-level context such as "founder-led outbound" or "rep ramp" when the segment supports it.
-
-# STYLE RULES
-- Plain English. Short sentences. No buzzwords.
-- Mild uncertainty is required: it should feel like "I might be wrong", not "we know your pain".
-- No em dashes. Use commas or periods.
-- No "I hope you are well", "unlock", "streamline", "transform", "optimize",
-  "accelerate", "elevate", "empower", "seamless", "game-changing", "cutting-edge",
-  "quick 15 minutes", or "would love to".
-- Do not start every sentence with "I". Vary the rhythm naturally.
-
-# LENGTH
-- Target 35-60 counted words excluding greeting and sign-off.
-- Never exceed 75 counted words excluding greeting and sign-off.
-
-# SUBJECT
-- Under 6 words.
-- Lowercase-friendly.
-- Human and slightly underconfident is OK.
-- Do not blindly copy the derived subject hint if it sounds like a marketing category.
-
-# SIGN-OFF (end of body after the question). Two lines:
-{sign_off}
-
-OUTPUT FORMAT - return raw JSON only, no markdown fences:
-{{"subject": "...", "body": "..."}}
-End with the two-line sign-off above; minor whitespace differences are acceptable.
-"""
+# Problem-validation / founder-led discovery (Helix cold-call campaigns)
 
 _PB_REVISION_EXTRAS = """\
 
 # REVISION RULES (only when rewriting after critique)
 - Fix ONLY the critique issues and hard-fail causes. Do **not** rewrite the whole
   email into a generic template.
-- **Keep** the segment angle (technical founder vs sales leader vs trust-heavy, etc.),
-  subject_line_hint, and voice of the first draft unless a cited issue requires a change.
-- Do not replace specific angle with bland "any founder" wording.
-- If the issue is evidence safety, remove the unsupported line; replace with one of the
-  safe patterns above, not with over-generic filler.
+- A revision should normally stay the same length or become shorter.
+  Do not add explanation unless the critique specifically identifies missing meaning.
+- Keep the research angle, outreach_role, recommended_ask, and voice of the first draft
+  unless a cited issue requires a change.
+- If the issue is evidence safety, remove the unsupported line; do not replace it with
+  over-generic filler.
 """
 
 
 QUESTION_RULES = {
     "yesno": (
-        "1. End with a simple yes/no question the reader can answer in 5 seconds.\n"
-        "2. The question should trigger a quick 'yes, actually...' reaction.\n"
-        "3. Keep it under 15 words.\n"
-        "4. NEVER use 'How do you currently...' as a question opener.\n"
-        "5. Do NOT ask generic questions like 'what\\'s your biggest challenge'."
+        "1. If a yes/no question best fits the recommended ask, make it easy to answer "
+        "in one sentence.\n"
+        "2. Keep it under 15 words.\n"
+        "3. NEVER use 'How do you currently...' as a question opener.\n"
+        "4. Do NOT ask generic questions like 'what\\'s your biggest challenge'."
     ),
     "open": (
-        "1. End with one bold, specific question that makes the reader pause.\n"
+        "1. Ask one specific question whose answer would materially improve the "
+        "sender's understanding.\n"
         "2. The question must be under 15 words.\n"
-        "3. The question must be hard to answer with a simple yes or no.\n"
+        "3. Prefer a discriminating question over a yes/no when recommended_ask "
+        "calls for interpretation or diagnosis.\n"
         "4. NEVER use 'How do you currently...' as a question opener.\n"
         "5. Do NOT ask generic questions like 'what\\'s your biggest challenge'."
     ),
@@ -864,36 +1132,48 @@ Return JSON: {{"subject":"...","body":"..."}}
 
 def _build_system_prompt(question_style: str, profile: dict) -> str:
     rules = QUESTION_RULES.get(question_style, QUESTION_RULES["yesno"])
-    return _DRAFTING_SYSTEM_TEMPLATE.format(
-        question_rules=rules,
-        product_context=profile["product_context"],
-        product_name=profile["product_name"],
-        sign_off=profile["sign_off"],
+    sign_off = build_wiserbond_sign_off(profile)
+    return with_first_touch_rules(
+        _DRAFTING_SYSTEM_TEMPLATE.format(
+            question_rules=rules,
+            product_context=profile["product_context"],
+            product_name=profile["product_name"],
+            sign_off=sign_off,
+        )
     )
 
 
 def _build_pb_system_prompt(profile: dict) -> str:
     mode = profile.get("email_mode", "problem_validation_email")
+    sign_off = build_pb_sign_off(profile)
+    product_name = profile.get("product_name") or ""
+    product_context = profile.get("product_context") or ""
     if mode == "sales_pitch_email":
-        return _DRAFTING_SALES_PITCH_TEMPLATE.format(
-            product_context=profile["product_context"],
-            sign_off=build_pb_sign_off(),
+        return with_first_touch_rules(
+            _DRAFTING_SALES_PITCH_TEMPLATE.format(
+                product_context=product_context,
+                sign_off=sign_off,
+            )
         )
     if mode == "trace_strategy_email":
         return build_trace_strategy_system_prompt(
-            product_context=profile["product_context"],
-            sign_off=build_pb_sign_off(),
+            product_context=product_context,
+            sign_off=sign_off,
         )
     if mode == "anti_ai_email":
-        return _DRAFTING_ANTI_AI_TEMPLATE.format(
-            product_context=profile["product_context"],
-            email_mode=mode,
-            sign_off=build_pb_sign_off(),
+        return with_first_touch_rules(
+            DRAFTING_PLAIN_TEMPLATE.format(
+                product_context=product_context,
+                product_name=product_name,
+                sign_off=sign_off,
+            )
         )
-    return _DRAFTING_PB_TEMPLATE.format(
-        product_context=profile["product_context"],
-        email_mode=mode,
-        sign_off=build_pb_sign_off(),
+    return with_first_touch_rules(
+        DRAFTING_SHORT_TEMPLATE.format(
+            product_context=product_context,
+            product_name=product_name,
+            sign_off=sign_off,
+        )
     )
 
 
@@ -927,52 +1207,54 @@ def claude_draft_email(
         raise EnvironmentError("ANTHROPIC_API_KEY is missing from .env")
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    kind = profile.get("profile_kind", "legacy")
+    mode = _effective_email_mode(profile)
+    uses_template = _uses_template_draft_path(profile)
 
-    if kind == "problem_validation":
+    if uses_template:
         system_prompt = _build_pb_system_prompt(profile)
-        mode = profile.get("email_mode", "problem_validation_email")
         anti_ai_mode = mode == "anti_ai_email"
         strategy_mode = mode == "trace_strategy_email"
-        if derived is None:
-            derived = derive_campaign_fields(lead, test_batch)
 
-        ctx = format_apollo_context_block(lead)
-        signal_blk = format_signal_evidence_block(lead)
-        if signal_blk:
-            ctx = f"{ctx}\n\n{signal_blk}"
-        subject_line_note = (
-            "subject_line_hint (context only; do not copy if it sounds like a "
-            "marketing category)"
-            if (anti_ai_mode or strategy_mode)
-            else "subject_line_hint (REQUIRED subject line — use this exact text)"
-        )
+        draft_ctx = format_drafting_context_package(lead)
         angle_note = (
-            f"DERIVED (for tone only; do not assert as fact about the prospect):\n"
-            f"- segment: {derived['segment']}\n"
-            f"- {subject_line_note}: {derived['subject_line_hint']}\n"
-            f"- email_angle: {derived['email_angle']}\n"
-            f"- buyer_angle: {derived['buyer_angle']}\n"
-            f"- likely_objection_context (internal, do not quote verbatim if it "
-            f"sounds like fake personalization): {derived['likely_objection_context']}\n"
-            f"- research_basis: {derived['research_basis']}\n"
+            "OUTREACH (Trace classification — follow this):\n"
+            f"- outreach_role: {lead.get('outreach_role') or 'Practitioner'}\n"
+            f"- recommended_ask: {lead.get('recommended_ask') or ''}\n"
+            "- Ground the observation in the Trace research package only.\n"
+            "- Match the closing question to outreach_role and recommended_ask.\n"
+            "- Ask intent comes from research; style comes from the selected template.\n"
         )
+        if derived:
+            angle_note += (
+                "\nOPTIONAL PROFILE CAMPAIGN HINTS (tone only; do not assert as fact):\n"
+                f"- segment: {derived.get('segment')}\n"
+                f"- subject_line_hint: {derived.get('subject_line_hint')}\n"
+                f"- email_angle: {derived.get('email_angle')}\n"
+            )
         if strategy_mode:
+            sig = build_pb_sign_off(profile)
             copy_blk = (
-                build_trace_strategy_sender_block()
+                build_trace_strategy_sender_block(
+                    profile.get("sender_block"), profile=profile
+                )
                 + "\n\n"
                 + "=== CAMPAIGN NOTES ===\n"
                 + f"- email_mode: {mode}\n"
                 + f"- test_batch: {test_batch or '(none)'}\n"
                 + f"- counted-body hard limit: {TRACE_STRATEGY_WORD_WARN_HI} words "
-                + "(greeting + two-line sign-off excluded)\n"
+                + "(greeting + two-line sign-off excluded; soft aim ~40–65, shorter OK)\n"
+                + "- required sign-off (exact two lines at end of email.body):\n"
+                + sig.replace("\n", "\n  ")
+                + "\n"
                 + "=== end campaign notes ===\n"
             )
-        elif anti_ai_mode:
-            copy_blk = _anti_ai_copy_constraints_block(lead, derived, test_batch)
         else:
-            copy_blk = _pb_copy_constraints_block(lead, derived, test_batch)
-        base_message = f"{ctx}\n\n{angle_note}\n{copy_blk}\n"
+            copy_blk = _profile_research_constraints_block(
+                lead,
+                profile,
+                style="plain" if anti_ai_mode else "short",
+            )
+        base_message = f"{draft_ctx}\n\n{angle_note}\n{copy_blk}\n"
         if revision:
             previous = revision.get("previous") or {}
             critique = revision.get("critique") or {}
@@ -1006,18 +1288,11 @@ def claude_draft_email(
             user_message = base_message
     else:
         title = lead.get("title", "")
-        company = lead.get("company", "")
-        name = lead.get("name", "")
-        angle_key = "senior" if _is_senior_title(title) else "early"
-        angle = profile["angles"][angle_key]
-        signal_blk = format_signal_evidence_block(lead)
-        extra = f"\n\n{signal_blk}" if signal_blk else ""
-        base_message = (
-            f"Prospect: {name}\n"
-            f"Title: {title}\n"
-            f"Company: {company}{extra}\n\n"
-            f"{angle}"
+        draft_ctx = format_drafting_context_package(lead)
+        outreach = legacy_outreach_angle(
+            lead, profile, is_senior=_is_senior_title(title)
         )
+        base_message = f"{draft_ctx}\n\n{outreach}\n"
         if revision:
             previous = revision.get("previous") or {}
             critique = revision.get("critique") or {}
@@ -1047,8 +1322,7 @@ def claude_draft_email(
         system_prompt = _build_system_prompt(question_style, profile)
 
     max_tokens = 4096 if (
-        kind == "problem_validation"
-        and profile.get("email_mode") == "trace_strategy_email"
+        uses_template and mode == "trace_strategy_email"
     ) else 768
 
     response = client.messages.create(
@@ -1061,16 +1335,12 @@ def claude_draft_email(
     raw = _strip_json_fences(response.content[0].text)
     email = json.loads(raw)
 
-    if (
-        kind == "problem_validation"
-        and profile.get("email_mode") == "trace_strategy_email"
-    ):
-        return normalize_trace_strategy_draft(email)
-
-    if "subject" not in email or "body" not in email:
+    if uses_template and mode == "trace_strategy_email":
+        email = normalize_trace_strategy_draft(email)
+    elif "subject" not in email or "body" not in email:
         raise ValueError("Claude response missing 'subject' or 'body' key")
 
-    return email
+    return ensure_draft_sign_off(email, profile)
 
 
 # ─── Email Critique (legacy) ───────────────────────────────────────────────
@@ -1080,39 +1350,45 @@ You are a brutal cold-email reviewer for first-touch B2B discovery outreach.
 Apply the rubric strictly. Default to lower scores. If unsure, deduct.
 
 This email is being sent to promote {product_name}. The body must NOT
-mention {product_name} or describe what it does. The sign-off line
-"{sign_off}" is the ONLY place {product_name} may appear, and the em
-dash inside that sign-off line is allowed. Em dashes anywhere else
-(subject or body) are a hard fail.
+mention {product_name} or describe what it does. The sign-off is the ONLY
+place the company name may appear. Never use em dashes anywhere in the
+subject or body, including the sign-off.
 
 # HARD FAILS (each one independently is a hard fail)
 - Banned hollow words appear in subject or body: "impressed", "inspiring",
   "admire", "fascinating", "excited", "thrilled", "remarkable",
   "incredible", "love", "noticed".
-- Em dashes or dashes anywhere except inside the sign-off line.
+- Em dashes (—) anywhere in the subject or body, including the sign-off.
 - Any sentence in the body starts with a verb (e.g. "Noticed", "Saw",
   "Hope", "Wanted").
 - Body mentions {product_name} or describes what it does or how it works.
 - Body requests a meeting, call, demo, time on calendar, or "15 minutes".
-- Body is not exactly 2 declarative/observational sentences plus 1
-  closing question.
-- Body word count exceeds 40 words (counted excluding the sign-off line).
+- Body has no focused closing question.
+- Body word count exceeds 75 words (counted excluding greeting and sign-off).
+  Do NOT fail merely because the email is short when complete.
 - The closing question opens with "How do you currently".
 - The sign-off line is missing or altered from "{sign_off}".
 - Subject line exceeds 6 words.
 - Prospect's first name appears more than once in subject + body
   combined (the greeting is the only place it should appear).
 - The email invents specific facts about the prospect or their company
-  that could not be derived just from their title and company name
-  (fake quotes, fake news, fake achievements, fake metrics).
+  that could not be derived from the Trace research package in the user
+  message (fake quotes, fake news, fake achievements, fake metrics).
+- Email asks the prospect about personal workflow pain when outreach_role
+  is Expert / Researcher or recommended_ask is validate_problem_interpretation.
+- Email contradicts why_surfaced, Trace recommendation, or outreach_role.
+- Email asks the recipient only to reconfirm a finding their cited research
+  already states, instead of asking one level beyond the source.
+- Email labels Trace interpretation as "the core finding" / "the main problem"
+  / "this proves" without the source supporting that characterization.
 
 # SOFT RUBRIC (each 0-25, total 0-100)
 - personalization: how naturally the email speaks to this specific
   prospect's likely reality vs. swap-the-name boilerplate. 25 = clearly
   written for them. 0 = generic.
-- question_quality: is the closing question sharp, specific, easy to
-  answer in seconds, and provoking a quick reaction? Generic questions
-  like "what's your biggest challenge" score near 0.
+- question_quality: is the closing question sharp, specific, and aligned
+  to recommended_ask / outreach_role? Generic questions like "what's your
+  biggest challenge" score near 0.
 - voice: peer-to-peer, pragmatic, direct, not salesy or hollow. Marketer
   energy or hype scores low.
 - hook: would a busy professional pause on the first sentence rather
@@ -1137,91 +1413,16 @@ is later needed.
 """
 
 
-_CRITIQUE_PB_TEMPLATE = """\
-You review a *problem-validation* cold email (founder-led discovery).
-
-Prospect facts available to the sender are ONLY what appears in the user
-message FACTS block. The email may briefly mention building a lightweight tool.
-
-# SIGN-OFF — NEVER a hard fail for whitespace or exact name spelling alone
-The body should end with two lines: a first name, then either "building Helix" or
-"Helix by Wiserbond" (minor variations OK). Accept Jamie, Hyunmyung, or other
-reasonable first names. Ignore extra blank lines and trivial spacing.
-**Do NOT output any hard_fail that only complains about sign-off formatting,
-exact line breaks, or benign name choice.** Missing a closing entirely is still a fail.
-
-# PRIORITY (when scoring)
-1. Problem relevance
-2. Non-aggressive tone
-3. Segment fit (soft — no accusations)
-4. Reply likelihood
-5. Clarity
-6. Evidence safety (no invented company facts)
-7. Feature density — penalize if it reads like a product pitch instead of problem discovery
-
-# SCORE CALIBRATION — be strict at the top; 80–89 is still useful for humans
-- **95–100**: exceptional — subject, body, question, segment fit, evidence safety
-  all clearly strong; ready to auto-send without hesitation.
-- **90–94**: strong — appropriate for pass / auto-send band.
-- **80–89**: **manual review queue** — not a failure; decent for problem-validation
-  experiments if issues are minor. Score honestly; do not force 90+ for adequate drafts.
-- **Below 80**: weak / should block unless only hard-fail fixes would rescue it.
-Most good-but-not-perfect drafts should land **80–89**. Reserve **95+** for rare excellence.
-When scoring 80–89, list 1–2 concrete improvements in issues — do not recommend
-rewriting into a blander generic email; preserve segment fit.
-
-# HARD FAILS (any one = hard fail) — NOT sign-off trivia
-- Invents facts not supported by the FACTS block (metrics, news, funding details, etc.).
-- Claims or implies the prospect has a specific internal problem without evidence
-  (e.g. they blank, forget, lose deals, repeat mistakes, team is bad at objections).
-- Overly negative framing about the reader or their org.
-- Fake personalization (over-specific claims from thin air).
-- Mostly product/feature explanation with no genuine problem-discovery question.
-- feature_density HARD FAIL: body lists **three or more** distinct concrete product
-  capabilities/behaviors (e.g. preload AND in-call click AND post-call AI refine all
-  enumerated as separate pitches) *when* the email no longer reads like discovery; OR
-  the closing question is missing / not about whether they relate to the problem.
-**Do NOT put body length / 75-word limits in hard_fails.** Length is enforced by
-deterministic code (greeting + sign-off excluded). You may mention length only in
-`issues` as optional feedback.
-- Subject longer than 7 words.
-- No signature / no closing lines at all at the end of the body.
-
-# SOFT SCORES (each sub-score as allocated below; integers; sum = total 0–100)
-Assign:
-- problem_relevance (0–20)
-- evidence_safety (0–20)
-- non_aggressive_tone (0–15)
-- segment_fit (0–12)
-- reply_likelihood (0–12)
-- clarity (0–11)
-- feature_density (0–10) — HIGH = appropriately light product mention, LOW = pitch-heavy
-
-"total" MUST equal the sum of these seven.
-
-# OUTPUT FORMAT — raw JSON only.
-{{
-  "hard_fails": [],
-  "soft_scores": {{
-    "problem_relevance": 0,
-    "evidence_safety": 0,
-    "non_aggressive_tone": 0,
-    "segment_fit": 0,
-    "reply_likelihood": 0,
-    "clarity": 0,
-    "feature_density": 0
-  }},
-  "total": 0,
-  "issues": []
-}}
-"""
-
-
 _CRITIQUE_TRACE_STRATEGY_TEMPLATE = """\
 You review a Trace *strategy* cold email (value-exchange first, not generic AI outbound).
 
 Prospect facts available to the sender are ONLY what appears in the FACTS block.
 Derived segment context is for tone only — not proven internal problems.
+
+# PRODUCT (this campaign)
+Product name: {product_name}
+Do not require Helix, Akashic, or any other product branding unless it matches
+the product name or the required sign-off below.
 
 # WHAT GOOD LOOKS LIKE
 - Clear why this recipient, why now, why this sender
@@ -1232,8 +1433,13 @@ Derived segment context is for tone only — not proven internal problems.
 - No fabricated research, product usage, customers, or metrics
 
 # SIGN-OFF — NEVER a hard fail for whitespace or exact name spelling alone
-Body should end with two lines: a first name, then "building Helix" or
-"Helix by Wiserbond" (minor variations OK). Missing a closing entirely is a fail.
+Body should end with these two lines (minor whitespace / benign name variants OK):
+{sign_off}
+
+Missing a closing entirely is a fail.
+**Do NOT hard-fail for missing "building Helix" or "Helix by Wiserbond"
+unless those exact lines are the required sign-off above.**
+Do not invent a different product line for the signature.
 
 # HARD FAILS (any one = hard fail)
 - Invents facts not supported by the FACTS block.
@@ -1247,21 +1453,21 @@ Body should end with two lines: a first name, then "building Helix" or
 **Do NOT put body length limits in hard_fails.** Length is enforced by deterministic code.
 A clear meeting / walkthrough / focused-question ask is ALLOWED in this mode.
 
-# SCORE CALIBRATION
-- **95–100**: exceptional value exchange; ready to auto-send.
-- **90–94**: strong; pass / auto-send band.
-- **80–89**: manual review queue — useful but imperfect.
-- **Below 80**: block.
-Most good-but-not-perfect drafts should land **80–89**.
+# SCORE CALIBRATION (same for every style)
+- **90–100**: strong copy.
+- **80–89**: usable / sendable once Integrity + Research alignment pass.
+- **70–79**: revise.
+- **Below 70**: rewrite.
+Do not treat 90 as the sendability cutoff. Sendability is Integrity + Alignment + score ≥ 80.
 
-# SOFT SCORES (integers; sum = total 0–100)
-- problem_relevance (0–20): trigger + hypothesis fit this recipient
-- evidence_safety (0–20): no invented facts; calibrated language
-- non_aggressive_tone (0–15): calm, peer, non-accusatory
-- segment_fit (0–12): founder vs sales-leader angle makes sense
-- reply_likelihood (0–12): easy to answer; clear reason to reply
-- clarity (0–11): why you / why me / why now / what ask
-- feature_density (0–10): HIGH = light product mention, LOW = feature tour
+# SOFT SCORES (integers; sum = total 0–100) — Copy quality layer only
+- opening_relevance (0–15): first sentence gives a reason to keep reading from the signal (not praise words)
+- evidence_distance (0–20): how far the email moves past what the research package supports (20 = tight)
+- question_quality (0–20): one clear ask aligned to outreach_role / recommended_ask
+- subject_fit (0–10): specific, natural, connected to the observation — not marketing, not a white-paper label
+- clarity (0–15)
+- brevity (0–10): complete without padding; under the word limit
+- naturalness (0–10): peer voice, no hollow hook words
 
 "total" MUST equal the sum of these seven.
 
@@ -1269,13 +1475,13 @@ Most good-but-not-perfect drafts should land **80–89**.
 {{
   "hard_fails": [],
   "soft_scores": {{
-    "problem_relevance": 0,
-    "evidence_safety": 0,
-    "non_aggressive_tone": 0,
-    "segment_fit": 0,
-    "reply_likelihood": 0,
+    "opening_relevance": 0,
+    "evidence_distance": 0,
+    "question_quality": 0,
+    "subject_fit": 0,
     "clarity": 0,
-    "feature_density": 0
+    "brevity": 0,
+    "naturalness": 0
   }},
   "total": 0,
   "issues": []
@@ -1293,40 +1499,61 @@ def claude_critique_email(
     if not ANTHROPIC_API_KEY:
         raise EnvironmentError("ANTHROPIC_API_KEY is missing from .env")
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    kind = profile.get("profile_kind", "legacy")
+    from trace_eval import (
+        COPY_SOFT_KEYS,
+        alignment_hard_fails,
+        annotate_critique,
+        evidence_level_for,
+        integrity_hard_fails,
+        strip_foreign_signoff_hard_fails,
+    )
 
-    if kind == "problem_validation":
-        if profile.get("email_mode") == "trace_strategy_email":
-            system_prompt = _CRITIQUE_TRACE_STRATEGY_TEMPLATE
-        else:
-            system_prompt = _CRITIQUE_PB_TEMPLATE
-        ctx = format_apollo_context_block(lead)
-        d_blob = ""
-        if derived:
-            d_blob = (
-                f"\nDerived segment: {derived.get('segment')}\n"
-                f"segment_reason: {derived.get('segment_reason')}\n"
-                f"Expected subject hint: {derived.get('subject_line_hint')}\n"
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    mode = _effective_email_mode(profile)
+    uses_template = _uses_template_draft_path(profile)
+    helix = _is_helix_profile(profile)
+    sign_off = build_pb_sign_off(profile)
+    product_name = profile.get("product_name") or "(campaign product)"
+
+    if uses_template:
+        if mode == "trace_strategy_email":
+            system_prompt = with_first_touch_critique_checks(
+                _CRITIQUE_TRACE_STRATEGY_TEMPLATE.format(
+                    product_name=product_name,
+                    sign_off=sign_off,
+                )
             )
-        user_message = (
-            f"{ctx}{d_blob}\n\n"
-            f"DRAFT TO REVIEW:\nSubject: {email.get('subject', '')}\n"
-            f"Body:\n{email.get('body', '')}\n"
-        )
+        elif mode == "anti_ai_email":
+            system_prompt = with_first_touch_critique_checks(
+                CRITIQUE_PLAIN_TEMPLATE.format(
+                    product_name=product_name,
+                    sign_off=sign_off,
+                )
+            )
+        else:
+            system_prompt = with_first_touch_critique_checks(
+                CRITIQUE_SHORT_TEMPLATE.format(
+                    product_name=product_name,
+                    sign_off=sign_off,
+                )
+            )
     else:
-        system_prompt = _CRITIQUE_SYSTEM_TEMPLATE.format(
-            product_name=profile["product_name"],
-            sign_off=profile["sign_off"],
+        system_prompt = with_first_touch_critique_checks(
+            _CRITIQUE_SYSTEM_TEMPLATE.format(
+                product_name=product_name,
+                sign_off=sign_off.replace("\n", " / "),
+            )
         )
-        user_message = (
-            f"Prospect: {lead.get('name', '')}\n"
-            f"Title: {lead.get('title', '')}\n"
-            f"Company: {lead.get('company', '')}\n\n"
-            f"DRAFT TO REVIEW:\n"
-            f"Subject: {email.get('subject', '')}\n"
-            f"Body:\n{email.get('body', '')}"
-        )
+
+    from trace_drafting import format_trace_critique_context
+
+    user_message = (
+        f"{format_trace_critique_context(lead)}\n\n"
+        f"SUBJECT:\n{email.get('subject') or ''}\n\n"
+        f"BODY:\n{email.get('body') or ''}\n"
+    )
+    if derived:
+        user_message += f"\nDERIVED (tone only):\n{json.dumps(derived, ensure_ascii=False)}\n"
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -1336,7 +1563,15 @@ def claude_critique_email(
     )
 
     raw = _strip_json_fences(response.content[0].text)
-    critique = json.loads(raw)
+    try:
+        critique = json.loads(raw)
+    except json.JSONDecodeError:
+        # One deterministic repair pass: take the first {...} object.
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        critique = json.loads(raw[start : end + 1])
 
     hard_fails = critique.get("hard_fails") or []
     soft = critique.get("soft_scores") or {}
@@ -1344,18 +1579,21 @@ def claude_critique_email(
 
     total = critique.get("total")
     if not isinstance(total, int):
-        if kind == "problem_validation":
-            keys = (
-                "problem_relevance",
-                "evidence_safety",
-                "non_aggressive_tone",
-                "segment_fit",
-                "reply_likelihood",
-                "clarity",
-                "feature_density",
-            )
-        else:
-            keys = ("personalization", "question_quality", "voice", "hook")
+        keys = COPY_SOFT_KEYS
+        # Backward-compatible sum if model returns an older schema.
+        if not any(k in soft for k in keys):
+            if uses_template:
+                keys = (
+                    "problem_relevance",
+                    "evidence_safety",
+                    "non_aggressive_tone",
+                    "segment_fit",
+                    "reply_likelihood",
+                    "clarity",
+                    "feature_density",
+                )
+            else:
+                keys = ("personalization", "question_quality", "voice", "hook")
         total = sum(int(soft.get(k, 0) or 0) for k in keys)
 
     out = {
@@ -1364,23 +1602,55 @@ def claude_critique_email(
         "total": int(total),
         "issues": [str(x) for x in issues if x],
     }
-    if kind == "problem_validation":
+    body = email.get("body") or ""
+    subject = email.get("subject") or ""
+    word_count = None
+    if uses_template:
         merged, meta = merge_pb_hard_fails_with_local_length(
-            email.get("body") or "",
+            body,
             lead.get("first_name") or "",
             out["hard_fails"],
             warn_hi=_pb_word_warn_hi(profile),
+            helix=helix,
+            required_sign_off=sign_off,
         )
         out["hard_fails"] = merged
         out["length_analysis"] = meta
-    return out
+        word_count = meta.get("body_word_count")
+    else:
+        out["hard_fails"] = strip_foreign_signoff_hard_fails(
+            out["hard_fails"], required_sign_off=sign_off
+        )
+        try:
+            word_count = pb_body_length_analysis(
+                body, lead.get("first_name") or "", warn_hi=75
+            ).get("body_word_count")
+        except Exception:
+            word_count = None
+
+    # Layered gates (Integrity → Alignment). Copy score stays in soft_scores/total.
+    llm_fails = list(out["hard_fails"])
+    integ = integrity_hard_fails(
+        body=body,
+        subject=subject,
+        sign_off=sign_off,
+        word_count=word_count,
+        word_limit=_pb_word_warn_hi(profile) if uses_template else 75,
+        llm_hard_fails=llm_fails,
+    )
+    align = alignment_hard_fails(
+        body=body,
+        evidence_level=evidence_level_for(lead),
+        llm_hard_fails=llm_fails,
+    )
+    return annotate_critique(out, integrity_fails=integ, alignment_fails=align)
 
 
 PASS_THRESHOLD = 80
-# Problem-validation: auto-pass / auto-send band; 80–89 = manual REVIEW queue
-PASS_THRESHOLD_PB = 90
+# Kept as aliases for older tests/docs; all styles now share QUALITY_SENDABLE.
+PASS_THRESHOLD_PB = 80
 REVIEW_THRESHOLD_PB_MIN = 80
-REVISE_THRESHOLD = 60
+REVISE_THRESHOLD = 70
 MAX_REVISE_ATTEMPTS = 1
 
 
@@ -1389,30 +1659,14 @@ def _decide_verdict(
     attempts_used: int,
     profile: dict,
 ) -> str:
-    kind = profile.get("profile_kind", "legacy")
-    hard = critique.get("hard_fails") or []
-    total = critique.get("total", 0)
+    from trace_eval import decide_verdict
 
-    if kind == "problem_validation":
-        if hard:
-            if attempts_used >= MAX_REVISE_ATTEMPTS:
-                return "block"
-            return "revise"
-        if total >= PASS_THRESHOLD_PB:
-            return "pass"
-        if total >= REVIEW_THRESHOLD_PB_MIN:
-            return "review"
-        return "block"
-
-    pt = PASS_THRESHOLD
-    rt = REVISE_THRESHOLD
-    if not hard and total >= pt:
-        return "pass"
-    if attempts_used >= MAX_REVISE_ATTEMPTS:
-        return "block"
-    if hard or total >= rt:
-        return "revise"
-    return "block"
+    return decide_verdict(
+        critique,
+        attempts_used,
+        integrity_fails=critique.get("integrity_fails"),
+        alignment_fails=critique.get("alignment_fails"),
+    )
 
 
 def _final_length_fields(
@@ -1467,12 +1721,12 @@ def _finalize_pb_with_humanize(
 
     if (
         no_humanize
-        or profile.get("profile_kind") != "problem_validation"
+        or not _uses_template_draft_path(profile)
         or verdict not in ("pass", "review")
     ):
         return email, critique, verdict, meta
 
-    sig = build_pb_sign_off()
+    sig = build_pb_sign_off(profile)
     raw_body = email.get("body") or ""
     lines = raw_body.replace("\r\n", "\n").split("\n")
     greeting_line = (
@@ -1545,31 +1799,61 @@ def _finalize_pb_with_humanize(
 
 
 PB_SOFT_KEYS = (
-    "problem_relevance",
-    "evidence_safety",
-    "non_aggressive_tone",
-    "segment_fit",
-    "reply_likelihood",
+    "opening_relevance",
+    "evidence_distance",
+    "question_quality",
+    "subject_fit",
     "clarity",
-    "feature_density",
+    "brevity",
+    "naturalness",
 )
 
-LEGACY_SOFT_KEYS = ("personalization", "question_quality", "voice", "hook")
+LEGACY_SOFT_KEYS = (
+    "opening_relevance",
+    "evidence_distance",
+    "question_quality",
+    "subject_fit",
+    "clarity",
+    "brevity",
+    "naturalness",
+)
 
 
 def _format_critique_log(critique: dict, profile: dict) -> list[str]:
+    from trace_eval import COPY_SOFT_KEYS
+
     soft = critique.get("soft_scores") or {}
-    keys = PB_SOFT_KEYS if profile.get("profile_kind") == "problem_validation" else LEGACY_SOFT_KEYS
+    keys = COPY_SOFT_KEYS if any(k in soft for k in COPY_SOFT_KEYS) else (
+        PB_SOFT_KEYS if _uses_template_draft_path(profile) else LEGACY_SOFT_KEYS
+    )
+    # Fall back to whatever keys the model returned.
+    if not any(k in soft for k in keys):
+        keys = tuple(soft.keys()) or keys
     soft_str = ", ".join(f"{k}={soft.get(k, 0)}" for k in keys)
+    band = critique.get("quality_band") or ""
+    layers = critique.get("layers") or {}
     lines = [f"  total={critique.get('total', 0)}/100  ({soft_str})"]
-    if profile.get("profile_kind") == "problem_validation":
+    if band or layers:
+        lines.append(
+            f"  layers: integrity={layers.get('integrity', '?')} "
+            f"alignment={layers.get('alignment', '?')} copy={band or layers.get('copy', '?')}"
+        )
+    if _uses_template_draft_path(profile):
         la = critique.get("length_analysis") or {}
         if la:
             lines.append(
                 f"  deterministic words (no greeting/sign-off): "
                 f"{la.get('body_word_count')} ({la.get('length_status')})"
             )
+    for h in critique.get("integrity_fails") or []:
+        lines.append(f"  INTEGRITY FAIL: {h}")
+    for h in critique.get("alignment_fails") or []:
+        lines.append(f"  ALIGNMENT FAIL: {h}")
     for h in critique.get("hard_fails") or []:
+        if h in (critique.get("integrity_fails") or []):
+            continue
+        if h in (critique.get("alignment_fails") or []):
+            continue
         lines.append(f"  HARD FAIL: {h}")
     for issue in critique.get("issues") or []:
         lines.append(f"  - {issue}")
@@ -1717,7 +2001,7 @@ def _parse_args():
         choices=list(LEAD_LISTS.keys()),
         default="akashic",
         dest="list_name",
-        help="Lead list: akashic | problem_validation | helix (alias for problem_validation).",
+        help="Lead list: akashic | problem_validation | helix | myzel | myzel_pet | oneaway.",
     )
     parser.add_argument(
         "--start", type=int, default=1,
@@ -1803,8 +2087,8 @@ def _parse_args():
         action="store_true",
         dest="discover_signals",
         help=(
-            "Research only through step 6: Grok scan + qualification + review queue. "
-            "You check LinkedIn. No Apollo, no email, no send. Alias: --research-only."
+            "Find people (Grok). In a real terminal, you then approve/reject each "
+            "person with a/r/s. Apollo + drafts run after you say yes. Alias: --research-only."
         ),
     )
     parser.add_argument(
@@ -1829,7 +2113,17 @@ def _parse_args():
         "--interactive-review",
         action="store_true",
         dest="interactive_review",
-        help="With --review-candidates: prompt APPROVED/REJECTED for each PENDING row.",
+        help=(
+            "In the terminal, approve/reject each PENDING person (a/r/s). "
+            "Works alone with --candidates-file, or after --discover-signals. "
+            "Then asks whether to fetch Apollo emails and write drafts."
+        ),
+    )
+    parser.add_argument(
+        "--no-interactive-review",
+        action="store_true",
+        dest="no_interactive_review",
+        help="After --discover-signals, do not prompt a/r/s (scripts / non-TTY).",
     )
     parser.add_argument(
         "--candidate-id",
@@ -1874,8 +2168,17 @@ def _parse_args():
         action="store_true",
         dest="process_approved",
         help=(
-            "After you APPROVED people and attached emails: draft with the existing "
-            "Trace engine (steps 9-10). Without --send, you still decide whether to send."
+            "After you APPROVED people: fetch emails from Apollo, then draft "
+            "(steps 8-9). Add --send for step 10. Manual CSV import is optional."
+        ),
+    )
+    parser.add_argument(
+        "--enrich-phones",
+        action="store_true",
+        dest="enrich_phones",
+        help=(
+            "Call Apollo people/bulk_match with reveal_phone_number for --list CSV "
+            "(default akashic). Writes a sibling .phones.csv; does not send email."
         ),
     )
     return parser.parse_args()
@@ -1906,7 +2209,7 @@ def _process_lead(
     title = lead.get("title", "")
 
     derived = None
-    if profile.get("profile_kind") == "problem_validation":
+    if _uses_template_draft_path(profile) and _is_helix_profile(profile):
         derived = derive_campaign_fields(lead, test_batch)
 
     print(f"\n{'─' * 50}")
@@ -1954,7 +2257,7 @@ def _process_lead(
     print(f"  Subject: {email['subject']}")
     print(f"  Body:\n{email['body']}\n")
 
-    if profile.get("profile_kind") == "problem_validation":
+    if _uses_template_draft_path(profile):
         _la = pb_body_length_analysis(
             email["body"],
             lead.get("first_name") or "",
@@ -1999,37 +2302,30 @@ def _process_lead(
         total_s = critique.get("total", 0)
 
         if verdict == "pass":
-            if profile.get("profile_kind") == "problem_validation":
-                print(
-                    f"  → PASS (≥ {PASS_THRESHOLD_PB}, no hard fails — "
-                    f"auto-send only with --send)."
-                )
-            else:
-                print(f"  → PASS (>= {PASS_THRESHOLD} and no hard fails).")
+            band = critique.get("quality_band") or ""
+            print(
+                f"  → PASS (Integrity+Alignment ok, score {total_s} ≥ {PASS_THRESHOLD}"
+                f"{f', {band}' if band else ''} — auto-send only with --send)."
+            )
             break
         if verdict == "review":
             print(
-                f"  → REVIEW (score {total_s} in {REVIEW_THRESHOLD_PB_MIN}–"
-                f"{PASS_THRESHOLD_PB - 1}, no hard fails). "
+                f"  → REVIEW (legacy path; score {total_s}). "
                 f"Manual approval; not auto-sent even with --send."
             )
             break
         if verdict == "block":
             hf = critique.get("hard_fails") or []
-            if profile.get("profile_kind") == "problem_validation":
-                if attempts_used >= MAX_REVISE_ATTEMPTS and hf:
-                    reason = "hard fail unresolved after revision"
-                elif total_s < REVIEW_THRESHOLD_PB_MIN:
-                    reason = f"score {total_s} below {REVIEW_THRESHOLD_PB_MIN} (block)"
-                else:
-                    reason = "blocked"
+            integ = critique.get("integrity_fails") or []
+            align = critique.get("alignment_fails") or []
+            if attempts_used >= MAX_REVISE_ATTEMPTS and (hf or integ or align):
+                reason = "hard fail unresolved after revision"
+            elif total_s < REVISE_THRESHOLD:
+                reason = f"score {total_s} below {REVISE_THRESHOLD} (rewrite)"
+            elif total_s < PASS_THRESHOLD:
+                reason = f"score {total_s} below {PASS_THRESHOLD} after revise"
             else:
-                if attempts_used >= MAX_REVISE_ATTEMPTS and hf:
-                    reason = "hard fail unresolved after revision"
-                elif attempts_used >= MAX_REVISE_ATTEMPTS:
-                    reason = f"score below threshold (< {PASS_THRESHOLD})"
-                else:
-                    reason = f"score below revise floor (< {REVISE_THRESHOLD})"
+                reason = "blocked"
             print(f"  → BLOCK ({reason}).")
             break
 
@@ -2068,7 +2364,7 @@ def _process_lead(
 
     hum_meta: dict[str, Any] = {}
     if (
-        profile.get("profile_kind") == "problem_validation"
+        _uses_template_draft_path(profile)
         and verdict in ("pass", "review")
     ):
         if no_humanize:
@@ -2262,49 +2558,183 @@ def _load_enriched_csv(filepath: str) -> list[dict]:
 
 
 def _print_next_discovery_steps(path: str) -> None:
-    print("\n--- Step 6 (you): LinkedIn check. Research path stops here. ---")
-    print(f"  python main.py --review-candidates --candidates-file {path}")
-    print("\n--- Email path (only after you confirm people) ---")
-    print("  7. Approve / reject (AI recommendation is kept):")
+    print("\n--- In a terminal, approve people yourself (a/r/s) ---")
+    print(
+        f"  python main.py --interactive-review --candidates-file {path}"
+    )
+    print("  Then Trace asks whether to fetch Apollo emails and write drafts.")
+    print("  Sending still needs --send, or a yes at the send prompt.")
+    print("\n--- Or approve one id at a time ---")
     print(
         f"     python main.py --set-human-status APPROVED "
         f"--candidate-id sig_... --candidates-file {path}"
     )
-    print(
-        f"     python main.py --set-human-status REJECTED --reject-reason vendor "
-        f"--candidate-id sig_... --candidates-file {path}"
-    )
-    print("  8. Apollo CSV (manual) then import emails:")
-    print(f"     python main.py --export-approved --candidates-file {path}")
-    print(
-        f"     python main.py --import-enriched apollo.csv --candidates-file {path}"
-    )
-    print("  9-10. Draft emails. Add --send only when you actually want PASS drafts sent:")
     print(f"     python main.py --process-approved --candidates-file {path}")
     print(f"     python main.py --process-approved --candidates-file {path} --send")
 
 
-def _run_interactive_review(path: str) -> None:
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _prompt_yes_no(prompt: str, *, default: bool) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        raw = input(prompt + suffix).strip().lower()
+    except EOFError:
+        return default
+    if not raw:
+        return default
+    return raw in ("y", "yes")
+
+
+def _run_interactive_review(path: str) -> int:
+    """Prompt a/r/s for each PENDING person. Returns how many are APPROVED."""
     rows = load_candidates(path)
     pending = [r for r in rows if r.get("human_status") == "PENDING"]
     if not pending:
         print("No PENDING candidates.")
-        return
-    for rec in pending:
+        return sum(1 for r in rows if r.get("human_status") == "APPROVED")
+    print(
+        f"\n--- Your turn: {len(pending)} people. "
+        "Open LinkedIn from the card, then a=approve  r=reject  s=skip ---"
+    )
+    for i, rec in enumerate(pending, 1):
+        print(f"\n[{i}/{len(pending)}]")
         print(format_review_card(rec))
-        raw = input("Approve / Reject / Skip [a/r/s]: ").strip().lower()
+        try:
+            raw = input("Approve / Reject / Skip [a/r/s]: ").strip().lower()
+        except EOFError:
+            print("No more input. Remaining people left PENDING.")
+            break
         if raw in ("a", "approve", "approved"):
             apply_human_decision(rows, rec["candidate_id"], "APPROVED")
+            print("  → APPROVED")
         elif raw in ("r", "reject", "rejected"):
-            reason = input(
-                "Optional reason (vendor/wrong_role/not_real_pain/"
-                "wrong_company/other/blank): "
-            ).strip().lower() or None
+            try:
+                reason = input(
+                    "Optional reason (vendor/wrong_role/not_real_pain/"
+                    "wrong_company/other/blank): "
+                ).strip().lower() or None
+            except EOFError:
+                reason = None
             apply_human_decision(rows, rec["candidate_id"], "REJECTED", reason)
+            print("  → REJECTED")
         else:
-            print("Skipped.")
+            print("  → skipped (still PENDING)")
     save_candidates(path, rows)
-    print(f"Saved decisions → {path}")
+    approved = sum(1 for r in rows if r.get("human_status") == "APPROVED")
+    rejected = sum(1 for r in rows if r.get("human_status") == "REJECTED")
+    still = sum(1 for r in rows if r.get("human_status") == "PENDING")
+    print(f"\nSaved → {path}")
+    print(f"APPROVED {approved}  REJECTED {rejected}  PENDING {still}")
+    return approved
+
+
+def _maybe_continue_after_review(path: str, args: argparse.Namespace) -> None:
+    rows = load_candidates(path)
+    approved = sum(1 for r in rows if r.get("human_status") == "APPROVED")
+    if approved == 0:
+        print("No one approved. Stopping before Apollo / drafts.")
+        return
+    if _stdin_is_tty():
+        if not _prompt_yes_no(
+            f"{approved} approved. Fetch emails from Apollo and write drafts?",
+            default=True,
+        ):
+            print(
+                f"Stopped. Later: python main.py --process-approved "
+                f"--candidates-file {path}"
+            )
+            return
+        send_ok = bool(args.send)
+        if send_ok:
+            print("`--send` is on: PASS ≥90 will go out.")
+        else:
+            send_ok = _prompt_yes_no(
+                "Send drafts that score 90+ now?",
+                default=False,
+            )
+    elif not args.process_approved:
+        print(
+            f"{approved} approved. Non-interactive: run "
+            f"python main.py --process-approved --candidates-file {path}"
+        )
+        return
+    else:
+        send_ok = bool(args.send)
+    _run_process_approved(path, args, send_ok=send_ok)
+
+
+def _run_process_approved(
+    path: str,
+    args: argparse.Namespace,
+    *,
+    send_ok: bool,
+) -> None:
+    rows = load_candidates(path)
+    need_email = [r for r in rows if should_enrich(r) and not should_draft(r)]
+    if need_email:
+        print("=== Apollo email enrich (approved, no address yet) ===")
+        try:
+            n = enrich_approved_candidates(rows)
+        except EnvironmentError as exc:
+            print(f"[FAIL] {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            print(f"[FAIL] Apollo email enrich failed: {exc}")
+            sys.exit(1)
+        save_candidates(path, rows)
+        print(f"Attached {n} emails. {len(need_email) - n} still missing.")
+    ready = [r for r in rows if should_draft(r)]
+    skipped_no_email = [
+        r for r in rows if should_enrich(r) and not should_draft(r)
+    ]
+    blocked = [r for r in rows if r.get("human_status") != "APPROVED"]
+    if skipped_no_email:
+        print(
+            f"{len(skipped_no_email)} APPROVED without email — kept, not drafted."
+        )
+    if not ready:
+        print("No APPROVED candidates with email. Nothing sent to the outbound engine.")
+        return
+    os.makedirs(args.output_dir, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_batch = (args.test_batch or "signals-approved").replace("/", "-")[:64]
+    jsonl_path = os.path.join(
+        args.output_dir, f"trace_{stamp}_{safe_batch}.jsonl",
+    )
+    print("=== Trace outbound (approved signals) ===")
+    print("    Gate 1 already passed (human_status=APPROVED).")
+    print(
+        "    Gate 2: "
+        + ("`--send` — PASS ≥90 will go out." if send_ok else "no --send, drafts only.")
+    )
+    print(f"    JSONL: {jsonl_path}\n")
+    counts: dict[str, int] = {}
+    for i, rec in enumerate(ready, 1):
+        list_name, profile = _profile_for_candidate(rec)
+        lead = enrich_lead_from_candidate(rec)
+        result = _process_lead(
+            i,
+            len(ready),
+            lead,
+            profile,
+            args.question_style,
+            send_ok=send_ok,
+            test_batch=args.test_batch or "signals-approved",
+            jsonl_path=jsonl_path,
+            list_name=list_name,
+            no_humanize=args.no_humanize,
+        )
+        rec["passed_to_outbound"] = True
+        rec["outbound_sent"] = result == "sent"
+        rec["outbound_result"] = result
+        counts[result] = counts.get(result, 0) + 1
+    save_candidates(path, rows)
+    print(f"\nPipeline complete: {counts}  |  not-approved ignored: {len(blocked)}")
+    print(f"JSONL: {jsonl_path}")
+    print(f"Candidates: {path}")
 
 
 def main():
@@ -2316,6 +2746,43 @@ def main():
         from reply_tracker import run_cli
 
         run_cli(args.replies_input, args.replies_output, int(args.since_days))
+        return
+
+    if args.enrich_phones:
+        csv_filename = LEAD_LISTS[args.list_name]
+        csv_path = os.path.join(os.path.dirname(__file__) or ".", csv_filename)
+        if not os.path.isfile(csv_path):
+            print(f"[FAIL] lead CSV not found: {csv_path}")
+            sys.exit(2)
+        out = args.export_csv
+        if not out:
+            base, ext = os.path.splitext(csv_path)
+            out = f"{base}.phones{ext or '.csv'}"
+        print("=== Trace Apollo phone enrich ===")
+        print(f"    List: {args.list_name}  |  Source: {csv_path}")
+        print("    Endpoint: people/bulk_match  reveal_phone_number=true")
+        print("    Mobile reveal bills extra Apollo credits if a number is found.")
+        print(f"    Output: {out}\n")
+        try:
+            from apollo_enrich import enrich_csv_phones
+
+            stats = enrich_csv_phones(
+                csv_path,
+                out,
+                limit=args.limit,
+                start=args.start,
+            )
+        except EnvironmentError as exc:
+            print(f"[FAIL] {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            print(f"[FAIL] Apollo phone enrich failed: {exc}")
+            sys.exit(1)
+        print(
+            f"Requested {stats['requested']}  |  with a number {stats['matched']}  |  "
+            f"mobile {stats['mobile']}  direct {stats['work_direct']}  other {stats['other']}"
+        )
+        print(f"Wrote → {out}")
         return
 
     if args.humanize_only:
@@ -2369,14 +2836,15 @@ def main():
         print(f"    List: {list_name}  |  Product: {ctx.get('product_name')}")
         print("    Grok: X + web in parallel, then merge/rank")
         print("    Prefer recent, identifiable, first-person pain. Cap per channel:", limit)
-        print("    Stops so you can check LinkedIn. No enrichment. No email. No send.")
+        print("    In a terminal you then approve/reject each person (a/r/s).")
+        print("    Apollo + drafts run after you say yes. Send still needs --send or a yes.")
         print(f"    Candidates: {jsonl_path}\n")
         cost_path = os.path.join(
             args.output_dir,
             f"research_cost_{stamp}_{list_name}_{safe_batch}.jsonl",
         )
         print(f"    Cost log: {cost_path}")
-        cache_path = os.path.join(args.output_dir, "research_cache.jsonl")
+        cache_path = os.path.join(args.output_dir, f"research_cache_{list_name}.jsonl")
         seed_paths = sorted(
             p for p in glob.glob(os.path.join(args.output_dir, f"signals_*_{list_name}_*.jsonl"))
             if os.path.abspath(p) != os.path.abspath(jsonl_path)
@@ -2415,7 +2883,11 @@ def main():
             print(format_review_card(rec))
             print()
         print(f"Wrote {len(rows)} candidates → {jsonl_path}")
-        _print_next_discovery_steps(jsonl_path)
+        if rows and not args.no_interactive_review and _stdin_is_tty():
+            _run_interactive_review(jsonl_path)
+            _maybe_continue_after_review(jsonl_path, args)
+        else:
+            _print_next_discovery_steps(jsonl_path)
         return
 
     if args.set_human_status:
@@ -2437,16 +2909,23 @@ def main():
             f"human_status={rec.get('human_status')}"
         )
         if rec.get("human_status") == "APPROVED":
-            print("Approved. Export for Apollo, then --import-enriched, then --process-approved.")
+            if args.process_approved:
+                print("Approved. Continuing to Apollo email match + drafts.")
+            else:
+                print("Approved. Next: --process-approved (Apollo emails + drafts).")
         else:
             print("Rejected. No enrichment or outbound.")
+        if not args.process_approved:
+            return
+
+    if args.interactive_review:
+        path = _require_candidates_file(args.candidates_file)
+        _run_interactive_review(path)
+        _maybe_continue_after_review(path, args)
         return
 
     if args.review_candidates:
         path = _require_candidates_file(args.candidates_file)
-        if args.interactive_review:
-            _run_interactive_review(path)
-            return
         rows = load_candidates(path)
         if not rows:
             print("No candidates in file.")
@@ -2492,53 +2971,7 @@ def main():
 
     if args.process_approved:
         path = _require_candidates_file(args.candidates_file)
-        rows = load_candidates(path)
-        ready = [r for r in rows if should_draft(r)]
-        skipped_no_email = [
-            r for r in rows if should_enrich(r) and not should_draft(r)
-        ]
-        blocked = [r for r in rows if r.get("human_status") != "APPROVED"]
-        if skipped_no_email:
-            print(
-                f"{len(skipped_no_email)} APPROVED without email — kept, not drafted."
-            )
-        if not ready:
-            print("No APPROVED candidates with email. Nothing sent to the outbound engine.")
-            return
-        os.makedirs(args.output_dir, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        safe_batch = (args.test_batch or "signals-approved").replace("/", "-")[:64]
-        jsonl_path = os.path.join(
-            args.output_dir, f"trace_{stamp}_{safe_batch}.jsonl",
-        )
-        print("=== Trace outbound (approved signals) ===")
-        print("    Gate 1 already passed (human_status=APPROVED).")
-        print("    Gate 2 unchanged: without --send, drafts are JSONL only.")
-        print(f"    JSONL: {jsonl_path}\n")
-        counts: dict[str, int] = {}
-        for i, rec in enumerate(ready, 1):
-            list_name, profile = _profile_for_candidate(rec)
-            lead = candidate_to_lead(rec)
-            result = _process_lead(
-                i,
-                len(ready),
-                lead,
-                profile,
-                args.question_style,
-                send_ok=args.send,
-                test_batch=args.test_batch or "signals-approved",
-                jsonl_path=jsonl_path,
-                list_name=list_name,
-                no_humanize=args.no_humanize,
-            )
-            rec["passed_to_outbound"] = True
-            rec["outbound_sent"] = result == "sent"
-            rec["outbound_result"] = result
-            counts[result] = counts.get(result, 0) + 1
-        save_candidates(path, rows)
-        print(f"\nPipeline complete: {counts}  |  not-approved ignored: {len(blocked)}")
-        print(f"JSONL: {jsonl_path}")
-        print(f"Candidates: {path}")
+        _run_process_approved(path, args, send_ok=bool(args.send))
         return
 
     start_idx = args.start
@@ -2562,7 +2995,7 @@ def main():
     print(f"    List: {list_name}  → profile: {profile_key}  |  Product: {profile['product_name']}")
     print(f"    Question style: {question_style}  |  Starting from lead #{start_idx}")
     send_note = (
-        "ON — auto-send PASS ≥90 only (REVIEW 80–89 never sent)"
+        "ON — auto-send PASS only (Integrity + Alignment + score ≥ 80)"
         if send_ok
         else "OFF — JSONL only; --send sends PASS tier only"
     )

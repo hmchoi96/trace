@@ -4,6 +4,10 @@ Kept separate from main.py so the long system prompt does not mix with
 problem_validation / anti_ai templates.
 """
 
+from __future__ import annotations
+
+from trace_first_touch import with_first_touch_rules
+
 TRACE_STRATEGY_SYSTEM_PROMPT = """
 # TRACE COLD EMAIL STRATEGY AND GENERATION PROMPT
 
@@ -119,7 +123,7 @@ Strong:
 
 "I built an outbound workflow connecting Apollo, LinkedIn, Hunter, HubSpot, and AI-based message review, then used it to run my own prospecting."
 
-The competency signal should usually appear within the first two sentences, but it must remain relevant to the recipient.
+Competency should appear in the email only when it earns the reply. Prefer relevance and ask first; include a brief proof only when it strengthens the value exchange.
 
 ---
 
@@ -164,11 +168,8 @@ Explain:
 
 Use transparency to build trust, not to make the email overly personal.
 
-Useful structure:
-
-"I am working toward X. Your work on Y is directly relevant because Z. I am reaching out to ask for A, and I believe I could contribute B."
-
 Do not pretend the outreach is purely altruistic if the sender clearly benefits.
+Do not follow a fixed sentence template for self-interest; keep it short and natural.
 
 ---
 
@@ -318,15 +319,16 @@ Generate three possible angles internally (trigger-led, problem-led, build-led, 
 
 # EMAIL CONSTRUCTION
 
-Use this general flow where appropriate:
+Choose the smallest message that can earn the reply.
 
-1. Relevant observation or reason for contacting
-2. Brief competency proof
-3. Problem hypothesis or opportunity
-4. Concrete value
-5. Clear CTA
+A strong first-touch email usually needs only:
+1. one relevant reason for writing,
+2. one useful observation, value, or credibility signal,
+3. one clear ask.
 
-Not every email needs exactly five paragraphs.
+Do not force every strategy component into the email.
+Competency, value, trigger, and evidence should guide the writing internally,
+but only the most useful one or two should appear in the final body.
 
 The email should feel like one coherent thought, not a template assembled from separate blocks.
 
@@ -357,22 +359,20 @@ Use praise only when it is specific and supports the reason for outreach.
 
 # BODY RULES
 
-Every sentence must perform at least one function:
+Every sentence must earn its place by doing at least one of these:
+establish relevance, add credibility, clarify value, or make the ask.
 
-* Establish relevance
-* Build credibility
-* Show understanding
-* Deliver value
-* Reduce risk
-* Clarify the request
+After drafting, perform one compression pass.
 
-Delete sentences that perform no clear function.
+Delete:
+* repeated context,
+* background the reader does not need,
+* research included only to prove you researched them,
+* product explanation not required to understand the ask,
+* second examples,
+* adjectives that do not change meaning.
 
-Keep paragraphs short.
-
-Prefer concrete language.
-
-Avoid excessive product explanation.
+Prefer short paragraphs and concrete language.
 
 ---
 
@@ -393,14 +393,18 @@ Avoid fake opt-out language such as:
 
 # LENGTH RULES
 
-Counted body length excludes the greeting line and the two-line sign-off.
+Count body words excluding the greeting and sign-off.
 
-Default:
+* Aim for about 40–65 words.
+* 30–40 words is fine when complete.
+* Never exceed 75 words.
+* 75 words is a ceiling, not a target.
 
-* Target 60 to 110 counted words
-* Never exceed 130 counted words
+Do not remove the one detail necessary to understand the value exchange.
+Remove everything else.
 
-Do not force the email to be short if shortening it removes the value exchange.
+If the email exceeds 75 words, simplify the message rather than squeezing
+more ideas into shorter sentences.
 Do not make the email long merely to display research.
 
 ---
@@ -421,7 +425,21 @@ Avoid sounding desperate, overly polished, corporate, submissive, aggressive, ov
 
 Use contractions where natural.
 
-Avoid excessive em dashes, exclamation marks, buzzwords, and stacked adjectives.
+Never use em dashes (—) anywhere in the subject or body. Use commas, periods, colons, or separate sentences instead.
+
+Subject lines may naturally use lowercase. Full grammatical sentences should normally use standard capitalization. Short fragments may occasionally begin lowercase when natural. Do not mechanically alternate capitalization.
+
+# READABILITY
+
+* Aim for roughly an 8th-grade reading level.
+* Write for a smart, busy reader, not an academic audience.
+* Prefer common words over formal alternatives.
+* Keep most sentences under 20 words.
+* Avoid nested clauses.
+* Keep necessary industry terms when the recipient actually uses them.
+* Simple English does not mean removing useful domain language.
+
+Avoid exclamation marks, buzzwords, and stacked adjectives.
 
 Do not use phrases such as:
 
@@ -489,7 +507,8 @@ When contacting a founder or executive:
 
 # SUBJECT LINE RULES
 
-Generate five subject line options.
+Generate 3 subject line options internally.
+Put the strongest in email.subject and return all 3 in subject_lines.
 
 Subject lines should be:
 
@@ -515,8 +534,6 @@ Avoid:
 * Generic first-name personalization
 
 Do not capitalize every word.
-
-Put the best subject in email.subject. Keep all five in subject_lines.
 
 ---
 
@@ -553,6 +570,17 @@ Reject or revise the draft if:
 * The sender's credibility is unsupported
 * The email contains fabricated personalization
 
+Before accepting the final email, ask:
+
+* Could this lose 10 words without losing meaning?
+* Is any sentence explaining research rather than using it?
+* Is there more than one main idea?
+* Is there more than one ask?
+* Is the email harder to read than the source material requires?
+
+If yes, compress and rewrite once before output.
+Internally form the full thought; output only the compressed version.
+
 ---
 
 # FINAL OUTPUT FORMAT
@@ -580,7 +608,7 @@ Use the following schema:
     "weak_assumptions_excluded": [],
     "unknowns": []
   },
-  "subject_lines": ["", "", "", "", ""],
+  "subject_lines": ["", "", ""],
   "email": {
     "subject": "",
     "body": "",
@@ -634,31 +662,37 @@ Use the following schema:
 
 def build_trace_strategy_system_prompt(*, product_context: str, sign_off: str) -> str:
     """Append campaign-specific product + sign-off constraints to the strategy prompt."""
-    return (
+    return with_first_touch_rules(
         TRACE_STRATEGY_SYSTEM_PROMPT
         + "\n\n---\n\n# CAMPAIGN CONSTRAINTS (this run)\n\n"
         + "## PRODUCT CONTEXT (internal; do not dump all features into the email)\n"
         + product_context.strip()
-        + "\n\n## SIGN-OFF (end of email.body after the CTA). Exactly two lines:\n"
+        + "\n\n## SIGN-OFF (end of email.body). Exactly two lines, no em dash:\n"
         + sign_off.strip()
         + "\n"
     )
 
 
-def build_trace_strategy_sender_block() -> str:
-    """Static sender facts available to the model for competency / value exchange."""
-    return """\
-=== SENDER (verified for this campaign) ===
-- Name: use the first line of the required sign-off
-- Current work: building Helix while doing founder-led outbound
-- Relevant system built: outbound workflow using Apollo list data, Claude draft + critique, and Outlook send
-- Product: Helix — lightweight in-call helper that surfaces the right script line (opening / objection / close) with one tap so the rep stops scrolling a long Google Doc mid-call
-- UVP: reallocate thinking time during the call from searching for the line to listening to the prospect
-- Honest scope: reduces early-ramp execution friction; does not claim to magically improve tone, timing, or ad-lib skill
-- Desired outcome (default): a low-friction reply or short conversation validating whether mid-call script search / cognitive load is a real pain (especially for new SDRs or founder-led outbound)
-- Value the sender can provide: a concrete observation about in-call script friction, and optionally a short walkthrough of what Helix does if relevant
-- Constraints: no fabricated customers, metrics, or product usage; Apollo FACTS only for the recipient; do not overclaim vs Gong/Chorus/Balto
-=== end sender ==="""
+def build_trace_strategy_sender_block(sender_block=None, profile: dict | None = None) -> str:
+    """Sender facts for competency / value exchange. Profile must supply context."""
+    custom = (sender_block or "").strip()
+    if custom:
+        return custom
+    if profile:
+        product = str(profile.get("product_name") or profile.get("discovery", {}).get("product_name") or "").strip()
+        sign_off = str(profile.get("sign_off") or "").strip()
+        context = str(profile.get("product_context") or "").strip()
+        excerpt = context[:600] + ("…" if len(context) > 600 else "")
+        return (
+            "=== SENDER (from profile) ===\n"
+            f"- Product: {product or '(see product context)'}\n"
+            f"- Sign-off: {sign_off or '(see campaign constraints)'}\n"
+            f"- Product context excerpt: {excerpt or '(none)'}\n"
+            "- Use this sender context for competency and value exchange. "
+            "Do not substitute Helix or another product unless named here.\n"
+            "=== end sender ==="
+        )
+    raise ValueError("Profile sender_block is required for Value-First Outreach drafts.")
 
 
 def normalize_trace_strategy_draft(raw: dict) -> dict:

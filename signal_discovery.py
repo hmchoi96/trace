@@ -70,6 +70,19 @@ def discovery_context_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
         elif not val:
             d[key] = []
     d.setdefault("target_users_or_buyers", "")
+    d.setdefault("search_guidance", "")
+    d.setdefault("qualification_question", "")
+    d.setdefault("evidence_families", "")
+    d.setdefault("prefer_web", False)
+    channels = d.get("search_channels")
+    if isinstance(channels, str) and channels.strip():
+        d["search_channels"] = [channels.strip().lower()]
+    elif isinstance(channels, list):
+        d["search_channels"] = [str(c).strip().lower() for c in channels if str(c).strip()]
+    else:
+        d["search_channels"] = ["x", "web"]
+    ratios = d.get("channel_limit_ratios")
+    d["channel_limit_ratios"] = ratios if isinstance(ratios, dict) else {}
     return d
 
 
@@ -93,6 +106,7 @@ def load_custom_profile(path: str) -> dict[str, Any]:
             "early": "ANGLE: Practitioner who may live with this workflow.",
         },
         "email_mode": data.get("email_mode"),
+        "sender_block": data.get("sender_block") or "",
         "discovery": ctx,
         "list_name": data.get("list_name") or "custom",
         "custom_config_path": path,
@@ -105,6 +119,13 @@ def _bullet(items: list[str]) -> str:
 
 
 def format_discovery_brief(ctx: dict[str, Any]) -> str:
+    extra = ""
+    guidance = (ctx.get("search_guidance") or "").strip()
+    if guidance:
+        extra += f"Search intent:\n{guidance}\n"
+    question = (ctx.get("qualification_question") or "").strip()
+    if question:
+        extra += f"Qualification question:\n{question}\n"
     return (
         f"Product: {ctx.get('product_name')}\n"
         f"What it does: {ctx.get('what_it_does')}\n"
@@ -113,6 +134,7 @@ def format_discovery_brief(ctx: dict[str, Any]) -> str:
         f"Example problem signals:\n{_bullet(ctx.get('examples_of_problem_signals') or [])}\n"
         f"Obvious non-targets / adjacent vendors:\n"
         f"{_bullet(ctx.get('obvious_non_targets_or_adjacent_vendors') or [])}\n"
+        f"{extra}"
     )
 
 
@@ -235,12 +257,22 @@ def _normalize_evidence_kind(value: str) -> str:
         "PAIN": "EXPLICIT_PAIN",
         "EXPLICIT_PAIN": "EXPLICIT_PAIN",
         "FIRST_PERSON_PAIN": "EXPLICIT_PAIN",
-        "WORKAROUND": "WORKAROUND",
-        "PAIN_WORKAROUND": "WORKAROUND",
+        "STORAGE": "STORAGE",
+        "REASONING_CAPTURE": "REASONING_CAPTURE",
+        "REASONING": "REASONING_CAPTURE",
+        "RETRIEVAL": "RETRIEVAL",
+        "REUSE": "REUSE",
         "BEHAVIORAL": "BEHAVIORAL_REUSE",
         "BEHAVIORAL_REUSE": "BEHAVIORAL_REUSE",
         "OUTCOME_FEEDBACK": "OUTCOME_FEEDBACK",
+        "CONTINUITY": "CONTINUITY",
         "INSTITUTIONAL_MEMORY": "INSTITUTIONAL_MEMORY",
+        "WORKAROUND": "WORKAROUND",
+        "PAIN_WORKAROUND": "WORKAROUND",
+        "COMPANY_TRIGGER": "COMPANY_TRIGGER",
+        "HIRING": "COMPANY_TRIGGER",
+        "FUNDING": "COMPANY_TRIGGER",
+        "GTM_STACK": "COMPANY_TRIGGER",
         "ADJACENT": "adjacent_reuse",
         "ADJACENT_REUSE": "adjacent_reuse",
         "ARTIFACT_REUSE": "adjacent_reuse",
@@ -250,6 +282,62 @@ def _normalize_evidence_kind(value: str) -> str:
     if v in aliases:
         return aliases[v]
     return (value or "").strip().lower().replace("-", "_").replace(" ", "_") or "other"
+
+
+_AKASHIC_STORAGE_MARKERS = re.compile(
+    r"\b(salesforce|hubspot|crm|dynamics\s*365|deal\s+history|knowledge\s+base|"
+    r"institutional\s+memory|data\s+room|document\s+storage|everything\s+lives\s+in)\b",
+    re.I,
+)
+_AKASHIC_REASONING_MARKERS = re.compile(
+    r"\b(why\s+we\s+passed|why\s+we\s+(got\s+comfortable|declined|walked|said\s+no)|"
+    r"record(ed|ing)?\s+why|revisit|look(ed)?\s+back|prior\s+(deal|investment|memo|underwriting)|"
+    r"previous\s+(deal|investment|memo)|initial\s+(assum|thesis|underwriting)|"
+    r"actual\s+vs|performance\s+vs|vs\s+expectations|ic\s+memo|investment\s+committee|"
+    r"pattern\s+recognition|playbook|similar\s+(deal|add-?on)|seen\s+this\s+(movie|before)|"
+    r"when\s+.*\s+left|context\s+(disappeared|walked\s+out|went\s+with)|"
+    r"lessons?\s+learned|postmortem|were\s+we\s+right|old\s+ic)\b",
+    re.I,
+)
+
+
+def _akashic_storage_only(text: str) -> bool:
+    t = text or ""
+    if not _AKASHIC_STORAGE_MARKERS.search(t):
+        return False
+    return not _AKASHIC_REASONING_MARKERS.search(t)
+
+
+def _infer_akashic_evidence_kind(text: str, current: str) -> str:
+    if current and current not in ("other", "WORKAROUND", "STORAGE", ""):
+        return current
+    t = text or ""
+    if _akashic_storage_only(t):
+        return "STORAGE"
+    if re.search(r"when\s+.*\s+left|context\s+(disappeared|walked\s+out|went\s+with)", t, re.I):
+        return "CONTINUITY"
+    if re.search(r"actual\s+vs|performance\s+vs|vs\s+expectations|were\s+we\s+right|postmortem", t, re.I):
+        return "OUTCOME_FEEDBACK"
+    if re.search(r"playbook|pattern\s+recognition|learned\s+from|handled\s+a\s+similar", t, re.I):
+        return "REUSE"
+    if re.search(r"revisit|look(ed)?\s+back|old\s+ic|prior\s+memo|similar\s+deal|search\s+old", t, re.I):
+        return "RETRIEVAL"
+    if re.search(r"why\s+we\s+passed|record(ed|ing)?\s+why|got\s+comfortable|rationale", t, re.I):
+        return "REASONING_CAPTURE"
+    return current or "other"
+
+
+def refine_akashic_signal(sig: dict[str, Any]) -> dict[str, Any]:
+    """Demote CRM/storage-only mentions; infer reasoning ladder when Grok mislabels."""
+    out = dict(sig)
+    text = str(out.get("signal_text") or "")
+    kind = _infer_akashic_evidence_kind(text, str(out.get("evidence_kind") or ""))
+    out["evidence_kind"] = _normalize_evidence_kind(kind)
+    if out["evidence_kind"] == "STORAGE" or _akashic_storage_only(text):
+        out["relevance"] = "generic"
+        if not out.get("why_relevant"):
+            out["why_relevant"] = "Storage/CRM mention without reasoning reuse."
+    return out
 
 
 def is_identifiable(signal: dict[str, Any]) -> bool:
@@ -305,19 +393,35 @@ def _recency_score(signal: dict[str, Any], now: datetime | None = None) -> int:
     return 1
 
 
-def rank_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def rank_signals(
+    signals: list[dict[str, Any]],
+    *,
+    prefer_web: bool = False,
+) -> list[dict[str, Any]]:
     """Prefer identifiable behavioral/pain evidence; recency is secondary, not a veto."""
     rel = {"highly_relevant": 3, "relevant": 2, "generic": 0, "irrelevant": 0}
     kind = {
+        "REUSE": 5,
+        "OUTCOME_FEEDBACK": 5,
+        "RETRIEVAL": 4,
+        "REASONING_CAPTURE": 4,
+        "CONTINUITY": 4,
+        "BEHAVIORAL_REUSE": 4,
         "EXPLICIT_PAIN": 3,
         "WORKAROUND": 3,
-        "BEHAVIORAL_REUSE": 3,
-        "OUTCOME_FEEDBACK": 3,
         "INSTITUTIONAL_MEMORY": 3,
+        "COMPANY_TRIGGER": 2,
+        "STORAGE": 0,
         "pain_workaround": 3,
         "other": 1,
         "adjacent_reuse": 0,
     }
+
+    def source_bonus(sig: dict[str, Any]) -> int:
+        src = sig.get("source") or ""
+        if prefer_web:
+            return 1 if src in ("web", "linkedin") else 0
+        return 1 if src == "x" else 0
 
     def key(sig: dict[str, Any]) -> tuple:
         return (
@@ -325,7 +429,7 @@ def rank_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
             1 if is_identifiable(sig) else 0,
             kind.get(sig.get("evidence_kind") or "other", 1),
             _recency_score(sig),
-            1 if sig.get("source") == "x" else 0,
+            source_bonus(sig),
         )
 
     return sorted(signals, key=key, reverse=True)
@@ -1198,16 +1302,262 @@ def import_enriched_leads(
     return updated
 
 
+def candidate_to_apollo_details(rec: dict[str, Any]) -> dict[str, str]:
+    from apollo_enrich import details_from_csv_row
+
+    first, last = split_name(rec.get("name") or rec.get("author_name") or "")
+    return details_from_csv_row({
+        "First Name": first,
+        "Last Name": last,
+        "Person Linkedin Url": rec.get("linkedin_url") or "",
+        "Company Name": rec.get("company") or "",
+        "Email": rec.get("email") or "",
+    })
+
+
+def phone_from_csv_row(row: dict[str, Any]) -> str:
+    for col in (
+        "Mobile Phone",
+        "Work Direct Phone",
+        "Other Phone",
+        "Corporate Phone",
+        "Home Phone",
+    ):
+        value = str(row.get(col) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def csv_row_as_contact_lead(row: dict[str, Any]) -> dict[str, Any]:
+    first = str(row.get("First Name") or "").strip()
+    last = str(row.get("Last Name") or "").strip()
+    return {
+        "candidate_id": str(row.get("candidate_id") or "").strip(),
+        "email": str(row.get("Email") or "").strip(),
+        "phone": phone_from_csv_row(row),
+        "name": f"{first} {last}".strip() or first or last,
+        "title": str(row.get("Title") or "").strip(),
+        "company": str(row.get("Company Name") or "").strip(),
+        "linkedin_url": str(row.get("Person Linkedin Url") or "").strip(),
+    }
+
+
+def apply_contact_lead(rec: dict[str, Any], lead: dict[str, Any]) -> bool:
+    """Attach email/phone from a matched lead onto a candidate record."""
+    changed = False
+    email = str(lead.get("email") or "").strip()
+    phone = str(lead.get("phone") or "").strip()
+    if email and not str(rec.get("email") or "").strip():
+        rec["email"] = email
+        rec["email_found"] = True
+        rec["email_source"] = "Apollo"
+        changed = True
+    if phone and not str(rec.get("phone") or "").strip():
+        rec["phone"] = phone
+        rec["phone_found"] = True
+        rec["phone_source"] = "Apollo"
+        changed = True
+    title = str(lead.get("title") or "").strip()
+    if title and not rec.get("title"):
+        rec["title"] = title
+    company = str(lead.get("company") or "").strip()
+    if company and (not rec.get("company") or rec.get("company") == "Unknown"):
+        rec["company"] = company
+    linkedin = str(lead.get("linkedin_url") or "").strip()
+    if linkedin and not rec.get("linkedin_url"):
+        rec["linkedin_url"] = linkedin
+    if changed:
+        rec["enrichment_attempted"] = True
+    return changed
+
+
+def sync_contact_from_csv_rows(rec: dict[str, Any], csv_rows: list[dict[str, Any]]) -> bool:
+    for row in csv_rows:
+        lead = csv_row_as_contact_lead(row)
+        if not lead.get("email") and not lead.get("phone"):
+            continue
+        if _match_enriched_row(rec, lead):
+            return apply_contact_lead(rec, lead)
+    return False
+
+
+def _apply_apollo_person(rec: dict[str, Any], person: dict[str, Any], email: str) -> None:
+    from apollo_enrich import pick_phones
+
+    rec["enrichment_attempted"] = True
+    if email:
+        rec["email"] = email
+        rec["email_found"] = True
+        rec["email_source"] = "Apollo"
+    title = str(person.get("title") or "").strip()
+    if title and not rec.get("title"):
+        rec["title"] = title
+    org = person.get("organization") if isinstance(person.get("organization"), dict) else {}
+    company = str(org.get("name") or person.get("organization_name") or "").strip()
+    if company and (not rec.get("company") or rec.get("company") == "Unknown"):
+        rec["company"] = company
+    linkedin = str(person.get("linkedin_url") or "").strip()
+    if linkedin and not rec.get("linkedin_url"):
+        rec["linkedin_url"] = linkedin
+    if not str(rec.get("phone") or "").strip():
+        phones = pick_phones(person.get("phone_numbers"))
+        phone = phones.get("mobile") or phones.get("work_direct") or phones.get("other") or ""
+        if phone:
+            rec["phone"] = phone
+            rec["phone_found"] = True
+            rec["phone_source"] = "Apollo"
+
+
+def enrich_approved_candidates(
+    rows: list[dict[str, Any]],
+    *,
+    matcher: Callable[..., dict[str, Any]] | None = None,
+    hunter_finder: Callable[..., dict[str, Any] | None] | None = None,
+    progress: Any = print,
+) -> int:
+    """Apollo bulk_match emails onto APPROVED candidates, then Hunter.io per person."""
+    from apollo_enrich import BULK_MATCH_LIMIT, bulk_match_people, emails_from_matches
+    from hunter_enrich import apply_hunter_email, find_email, hunter_ready
+
+    fn = matcher or bulk_match_people
+    hunter_fn = hunter_finder or find_email
+    need = [
+        rec for rec in rows
+        if should_enrich(rec) and not (rec.get("email") or "").strip()
+    ]
+    if not need:
+        return 0
+    updated = 0
+    for i in range(0, len(need), BULK_MATCH_LIMIT):
+        batch = need[i : i + BULK_MATCH_LIMIT]
+        details = [candidate_to_apollo_details(rec) for rec in batch]
+        if progress:
+            progress(f"  Apollo email match {len(details)} approved people…")
+        payload = fn(
+            details,
+            reveal_phone_number=False,
+            reveal_personal_emails=True,
+        )
+        emails = emails_from_matches(payload if isinstance(payload, dict) else {})
+        matches = payload.get("matches") if isinstance(payload, dict) else []
+        if not isinstance(matches, list):
+            matches = []
+        for j, rec in enumerate(batch):
+            person = matches[j] if j < len(matches) else None
+            email = emails[j] if j < len(emails) else ""
+            if isinstance(person, dict):
+                _apply_apollo_person(rec, person, email)
+            else:
+                rec["enrichment_attempted"] = True
+            if (rec.get("email") or "").strip():
+                updated += 1
+
+    if hunter_ready():
+        for rec in need:
+            if (rec.get("email") or "").strip():
+                continue
+            if progress:
+                progress(f"  Hunter.io email lookup for {rec.get('name') or rec.get('candidate_id')}…")
+            try:
+                data = hunter_fn(rec)
+            except Exception:
+                rec["enrichment_attempted"] = True
+                continue
+            if data and apply_hunter_email(rec, data):
+                updated += 1
+    return updated
+
+
+def discovery_channel_plan(ctx: dict[str, Any], limit: int) -> list[tuple[str, int]]:
+    channels = ctx.get("search_channels") or ["x", "web"]
+    ratios = ctx.get("channel_limit_ratios") or {}
+    if not isinstance(ratios, dict):
+        ratios = {}
+    plan: list[tuple[str, int]] = []
+    for ch in channels:
+        if ch not in ("x", "web"):
+            continue
+        raw_ratio = ratios.get(ch, 1.0)
+        try:
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError):
+            ratio = 1.0
+        if ratio <= 0:
+            continue
+        n = max(1, int(round(limit * ratio)))
+        plan.append((ch, n))
+    return plan or [("x", limit), ("web", limit)]
+
+
+_DEFAULT_EVIDENCE_FAMILIES = """\
+A. EXPLICIT_PAIN — they state the friction directly (hard to find prior decisions,
+knowledge in heads, scattered files, starting over).
+B. WORKAROUND — manual process they already run to recover prior judgment (old memos,
+spreadsheets, partner pinging, precedent libraries). CRM/storage alone is weak.
+C. BEHAVIORAL_REUSE — past situation → judgment → lesson/outcome → reused next time.
+Language like playbook, pattern recognition, lessons learned, precedent, seen this before,
+repeatable approach, what worked / what didn't. Often the strongest signal.
+D. OUTCOME_FEEDBACK — they later check whether a prior call was right (were we right to
+pass, postmortem, actual vs original assumptions, reviewing misses).
+E. INSTITUTIONAL_MEMORY — team/firm-level preservation (shared memory, onboarding off
+prior work, internal playbooks, knowledge transfer). Look for the behavior, not a slogan."""
+
+
 def discovery_prompt(ctx: dict[str, Any], limit: int, channel: str = "web") -> str:
     if channel == "x":
         channel_rules = (
             "Search ONLY X (Twitter) with x_search. Posts, replies, and threads. "
             "Do not use web_search. Every signal source must be x."
         )
+    elif ctx.get("prefer_web"):
+        channel_rules = (
+            "Search ONLY the public web with web_search. Prefer company sites, "
+            "hiring pages, funding/news, LinkedIn public posts and profiles "
+            "(site:linkedin.com), blogs, and interviews. "
+            "Do not use x_search. Signal source should be linkedin, web, or reddit."
+        )
     else:
         channel_rules = (
             "Search ONLY the public web with web_search (Reddit, blogs, forums, interviews). "
             "Do not use x_search. Signal source should be reddit or web."
+        )
+    evidence = (ctx.get("evidence_families") or "").strip() or _DEFAULT_EVIDENCE_FAMILIES
+    ontology = str(ctx.get("signal_ontology") or "").strip()
+    if ontology == "decision_reasoning":
+        kinds = (
+            "STORAGE|REASONING_CAPTURE|RETRIEVAL|REUSE|OUTCOME_FEEDBACK|CONTINUITY|"
+            "EXPLICIT_PAIN|WORKAROUND|BEHAVIORAL_REUSE|INSTITUTIONAL_MEMORY|"
+            "COMPANY_TRIGGER|adjacent_reuse|other"
+        )
+        crm_rule = (
+            "Do NOT treat CRM usage, document storage, knowledge-management tooling, or "
+            "'institutional memory' slogans by themselves as evidence of the problem. "
+            "Look for evidence that people preserve, retrieve, compare, revise, or evaluate "
+            "the reasoning behind prior decisions.\n"
+            "STORAGE-only signals (e.g. 'we use Salesforce', 'deal history in CRM') must be "
+            "relevance=generic, not highly_relevant.\n"
+            "Minimum Akashic bar: REASONING_CAPTURE plus RETRIEVAL or REUSE.\n"
+        )
+    elif ctx.get("prefer_web") or (ctx.get("evidence_families") or "").strip():
+        kinds = (
+            "EXPLICIT_PAIN|WORKAROUND|BEHAVIORAL_REUSE|OUTCOME_FEEDBACK|"
+            "INSTITUTIONAL_MEMORY|COMPANY_TRIGGER|adjacent_reuse|other"
+        )
+        crm_rule = ""
+    else:
+        kinds = (
+            "EXPLICIT_PAIN|WORKAROUND|BEHAVIORAL_REUSE|OUTCOME_FEEDBACK|"
+            "INSTITUTIONAL_MEMORY|adjacent_reuse|other"
+        )
+        crm_rule = ""
+    query_examples = ctx.get("search_query_examples") or []
+    examples_block = ""
+    if query_examples:
+        examples_block = (
+            "Example behavior-centered searches (adapt phrasing; do not copy blindly):\n"
+            + _bullet([str(q) for q in query_examples])
+            + "\n"
         )
     return f"""You are Trace's public-signal researcher. You find evidence, not sales leads.
 
@@ -1226,19 +1576,9 @@ Do not search primarily for people asking for the product, a category, or a solu
 (examples of solution language to avoid as primary queries: "decision memory",
 "institutional memory", "CJR", "on-prem AI", "knowledge management tool").
 
-Evidence families — search each independently. Explicit pain wording is not required.
+{crm_rule}{examples_block}Evidence families — search each independently. Explicit pain wording is not required.
 
-A. EXPLICIT_PAIN — they state the friction directly (hard to find prior decisions,
-knowledge in heads, scattered files, starting over).
-B. WORKAROUND — they already use CRM, old memos, spreadsheets, partner pinging,
-precedent libraries, notes on why they passed or failed. The workaround itself is evidence.
-C. BEHAVIORAL_REUSE — past situation → judgment → lesson/outcome → reused next time.
-Language like playbook, pattern recognition, lessons learned, precedent, seen this before,
-repeatable approach, what worked / what didn't. Often the strongest signal.
-D. OUTCOME_FEEDBACK — they later check whether a prior call was right (were we right to
-pass, postmortem, actual vs original assumptions, reviewing misses).
-E. INSTITUTIONAL_MEMORY — team/firm-level preservation (shared memory, onboarding off
-prior work, internal playbooks, knowledge transfer). Look for the behavior, not a slogan.
+{evidence}
 
 "We do this and it is annoying / we keep redoing it" is a strong signal.
 "That became our playbook / it's pattern recognition / we learned from the last one"
@@ -1256,8 +1596,8 @@ Ranking / selection rules (apply on every product):
 2. Older evidence is not automatically weak. A 2022 description of the same behavior is
    still evidence. If you also find a recent corroboration from the same person or firm,
    that strengthens the signal; do not drop the older one.
-3. Prefer behavioral reuse, workaround, outcome feedback, and explicit pain over adjacent
-   artifact reuse ("we reuse old templates/files" with no judgment reuse).
+3. Prefer behavioral reuse, retrieval, reasoning capture, outcome feedback, and continuity
+   over storage-only CRM mentions ("we use Salesforce" with no judgment reuse).
 4. Prefer first-person operational evidence ("our team…", "we still manually…", "I usually…")
    over generic thought-leadership ("AI will transform…", "companies need…").
 
@@ -1273,7 +1613,7 @@ Return JSON only:
   "search_concepts": ["latent concept and practitioner phrasings you actually searched"],
   "signals": [
     {{
-      "source": "x|reddit|web",
+      "source": "x|reddit|web|linkedin",
       "source_url": "https://...",
       "author_name": "",
       "author_handle": "",
@@ -1282,7 +1622,7 @@ Return JSON only:
       "why_relevant": "one sentence",
       "latent_behavior": "underlying behavior, not the keyword",
       "relevance": "relevant|highly_relevant|generic|irrelevant",
-      "evidence_kind": "EXPLICIT_PAIN|WORKAROUND|BEHAVIORAL_REUSE|OUTCOME_FEEDBACK|INSTITUTIONAL_MEMORY|adjacent_reuse|other"
+      "evidence_kind": "{kinds}"
     }}
   ]
 }}
@@ -1320,6 +1660,10 @@ Public signal:
 - Evidence kind: {signal.get('evidence_kind') or ''}
 {extra_block}
 Score what they are actually describing or doing BEFORE you score their title.
+
+Do not treat CRM usage, document storage, or knowledge-management tooling by itself as
+evidence of the problem. Look for preserve / retrieve / compare / revise / evaluate
+behavior around prior decision reasoning. Storage-only quotes are weak.
 
 Use web_search (and x_search if helpful) to find who this author is professionally.
 If you cannot resolve a real identity (anonymous Reddit, throwaway, etc.), say so.
@@ -1709,6 +2053,7 @@ def run_discovery(
     run_id: str | None = None,
     cache_path: str | None = None,
     seed_candidate_paths: list[str] | None = None,
+    on_stage: Callable[[str, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     ctx = discovery_context_from_profile(profile)
     inner = researcher or grok_research
@@ -1719,6 +2064,8 @@ def run_discovery(
         person_name = str(kwargs.pop("person_name", "") or "")
         entity_key = str(kwargs.pop("entity_key", "") or "")
         signal_url = str(kwargs.pop("signal_url", "") or "")
+        if on_stage:
+            on_stage(stage, person_name)
         started = time.monotonic()
         result = _invoke_researcher(
             inner,
@@ -1763,18 +2110,37 @@ def run_discovery(
                 f"web={web_b}/{web_a}  x={x_b}/{x_a}"
             )
         return result
-    print("Searching X and web in parallel…")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_x = pool.submit(_search_channel, fn, ctx, limit, "x")
-        fut_web = pool.submit(_search_channel, fn, ctx, limit, "web")
-        x_found = fut_x.result()
-        web_found = fut_web.result()
-    x_signals = parse_signal_list(x_found.get("text") or "", x_found.get("citations") or [])
-    web_signals = parse_signal_list(web_found.get("text") or "", web_found.get("citations") or [])
-    for sig in x_signals:
-        if not sig.get("source") or sig.get("source") == "web":
-            sig["source"] = infer_source(sig.get("source_url") or "", "x")
-    signals = rank_signals(dedupe_signals(x_signals + web_signals))
+    plan = discovery_channel_plan(ctx, limit)
+    if on_stage:
+        on_stage("search", "")
+    print(
+        "Searching "
+        + " + ".join(f"{ch} (up to {n})" for ch, n in plan)
+        + "…"
+    )
+    found: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(2, max(1, len(plan)))) as pool:
+        futs = {
+            pool.submit(_search_channel, fn, ctx, n, ch): ch
+            for ch, n in plan
+        }
+        for fut in as_completed(futs):
+            found[futs[fut]] = fut.result()
+    signals: list[dict[str, Any]] = []
+    for ch, _n in plan:
+        out = found.get(ch) or {}
+        items = parse_signal_list(out.get("text") or "", out.get("citations") or [])
+        if ch == "x":
+            for sig in items:
+                if not sig.get("source") or sig.get("source") == "web":
+                    sig["source"] = infer_source(sig.get("source_url") or "", "x")
+        signals.extend(items)
+    if profile_key == "akashic":
+        signals = [refine_akashic_signal(sig) for sig in signals]
+    signals = rank_signals(
+        dedupe_signals(signals),
+        prefer_web=bool(ctx.get("prefer_web")),
+    )
     snapshot = None
     if profile_key not in ("akashic", "problem_validation"):
         snapshot = {
@@ -1784,6 +2150,7 @@ def run_discovery(
             "sign_off": profile.get("sign_off"),
             "angles": profile.get("angles"),
             "email_mode": profile.get("email_mode"),
+            "sender_block": profile.get("sender_block"),
             "discovery": ctx,
         }
     cache_rows = load_research_cache(cache_path) if cache_path else []

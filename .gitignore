@@ -21,3 +21,12 @@ venv/
 *.csv
 runs/
 research_cache.jsonl
+*.db
+*.db-wal
+*.db-shm
+
+# Web app
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local

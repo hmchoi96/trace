@@ -2,3 +2,7 @@ anthropic
 requests
 python-dotenv
 pytest
+
+# Local app (API + background jobs)
+fastapi
+uvicorn[standard]
