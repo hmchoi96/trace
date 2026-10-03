@@ -19,7 +19,7 @@ import {
   TextInput,
   Toggle,
 } from "../components/ui";
-import type { ProfilePayload, Template } from "../lib/api";
+import type { Profile, ProfilePayload, Template } from "../lib/api";
 
 type ProfileDraft = {
   name: string;
@@ -41,6 +41,52 @@ type ProfileDraft = {
   x: boolean;
   preferWeb: boolean;
 };
+
+function senderField(block: string, label: string): string {
+  const prefix = `- ${label}:`;
+  const hit = block.split("\n").find((line) => line.startsWith(prefix));
+  return hit ? hit.slice(prefix.length).trim() : "";
+}
+
+function asLines(value: unknown): string {
+  if (Array.isArray(value)) return value.map((line) => String(line).trim()).filter(Boolean).join("\n");
+  return typeof value === "string" ? value : "";
+}
+
+export function draftFromProfile(profile: Profile): ProfileDraft {
+  const raw = profile.profile as {
+    discovery?: Record<string, unknown>;
+    sender_block?: string;
+  };
+  const discovery = raw.discovery ?? {};
+  const channels = Array.isArray(discovery.search_channels)
+    ? discovery.search_channels.map(String)
+    : ["web"];
+  const block = String(raw.sender_block ?? "");
+  const signOff = profile.signOff.includes("\n")
+    ? profile.signOff.replace(/\n/g, ", ")
+    : profile.signOff;
+  return {
+    name: profile.productName || profile.name,
+    whatItDoes: String(discovery.what_it_does ?? ""),
+    senderName: profile.senderName,
+    senderCompany: profile.senderCompany,
+    senderWork: senderField(block, "Current work") || senderField(block, "Status"),
+    signOff,
+    desiredOutcome: senderField(block, "Desired outcome"),
+    buyers: String(discovery.target_users_or_buyers ?? profile.huntDescription),
+    problems: asLines(discovery.problems_it_solves),
+    goodSignals: asLines(discovery.examples_of_problem_signals),
+    skip: asLines(discovery.obvious_non_targets_or_adjacent_vendors),
+    qualify: String(discovery.qualification_question ?? ""),
+    searchGuidance: String(discovery.search_guidance ?? ""),
+    template: profile.defaultTemplate,
+    web: channels.includes("web"),
+    linkedin: channels.includes("linkedin"),
+    x: channels.includes("x"),
+    preferWeb: Boolean(discovery.prefer_web),
+  };
+}
 
 function emptyDraft(template: string): ProfileDraft {
   return {
@@ -86,13 +132,23 @@ export function AddProfile({
   templates,
   onSave,
   onCancel,
+  initial,
+  heading = "Add a profile",
+  lede = "This is the brief Trace hunts from. Not a name and a sentence. Helix, Akashic, and OneAway each need their own. They do not share people.",
+  saveLabel = "Save profile",
 }: {
   templates: Template[];
   onSave: (payload: ProfilePayload) => Promise<void>;
   onCancel: () => void;
+  initial?: ProfileDraft;
+  heading?: string;
+  lede?: string;
+  saveLabel?: string;
 }) {
   const defaultTemplate = templates[0]?.id ?? "strategy";
-  const [draft, setDraft] = useState<ProfileDraft>(() => emptyDraft(defaultTemplate));
+  const [draft, setDraft] = useState<ProfileDraft>(
+    () => initial ?? emptyDraft(defaultTemplate),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,11 +195,8 @@ export function AddProfile({
   return (
     <Stack gap={16}>
       <Stack gap={4}>
-        <H2>Add a profile</H2>
-        <Text tone="secondary">
-          This is the brief Trace hunts from. Not a name and a sentence. Helix, Akashic, and
-          OneAway each need their own. They do not share people.
-        </Text>
+        <H2>{heading}</H2>
+        <Text tone="secondary">{lede}</Text>
       </Stack>
 
       {error && (
@@ -313,7 +366,7 @@ export function AddProfile({
             </Field>
             <Row gap={8}>
               <Button variant="primary" onClick={save} disabled={!ready || busy}>
-                {busy ? "Saving…" : "Save profile"}
+                {busy ? "Saving…" : saveLabel}
               </Button>
               <Button variant="ghost" onClick={onCancel}>
                 Cancel

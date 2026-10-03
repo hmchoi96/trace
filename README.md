@@ -35,6 +35,7 @@ The app keeps its state in `runs/trace_app.db`. Research output is still written
 - A draft that did not clear the quality check cannot be sent.
 - Clicking send twice sends once.
 - If the connected mailbox is not the profile's sender, Trace refuses to send.
+- After a first send, Records can write a short follow-up. That is a bump, not a new pitch.
 
 ### Email templates
 

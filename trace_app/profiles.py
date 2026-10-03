@@ -59,7 +59,7 @@ TEMPLATES = {
 DEFAULT_TEMPLATE = "strategy"
 
 # Engine profile keys that the app seeds on first run.
-BUILTIN_KEYS = ("oneaway", "problem_validation", "akashic", "myzel", "myzel_pet")
+BUILTIN_KEYS = ("oneaway", "problem_validation", "akashic", "myzel", "myzel_pet", "keycard")
 
 BUILTIN_LABELS = {
     "oneaway": "OneAway",
@@ -67,6 +67,7 @@ BUILTIN_LABELS = {
     "akashic": "Akashic",
     "myzel": "Myzel Organics",
     "myzel_pet": "Myzel Organics (pet)",
+    "keycard": "Keycard",
 }
 
 
@@ -91,11 +92,18 @@ def template_for(profile_json: dict[str, Any], template_id: str | None) -> dict[
 def sign_off_for(profile_json: dict[str, Any]) -> str:
     import os
 
-    full = os.getenv("SENDER_FULL_NAME", "").strip()
-    if full:
+    explicit = str(profile_json.get("sign_off") or "").strip()
+    # keep_sign_off: name can follow .env, company stays the one in the profile.
+    if profile_json.get("keep_sign_off") and explicit:
+        raw = explicit.lstrip("—–-").strip()
+        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+        full = os.getenv("SENDER_FULL_NAME", "").strip()
+        if full and lines:
+            return f"{full}\n{lines[-1]}"
+    elif os.getenv("SENDER_FULL_NAME", "").strip():
+        full = os.getenv("SENDER_FULL_NAME", "").strip()
         company = os.getenv("SENDER_COMPANY", "Wiserbond Technologies Inc.").strip()
         return f"{full}\n{company}"
-    explicit = str(profile_json.get("sign_off") or "").strip()
     if explicit:
         raw = explicit.lstrip("—–-").strip()
         if "\n" in raw:
@@ -151,6 +159,12 @@ def _builtin_rows() -> list[dict[str, Any]]:
             parts = [p.strip() for p in parts[0].split(",")]
         sender_name = parts[0] if parts else ""
         sender_company = parts[1] if len(parts) > 1 else str(pj.get("product_name") or "")
+        if pj.get("keep_sign_off"):
+            signed = [ln.strip() for ln in sign_off_for(pj).split("\n") if ln.strip()]
+            if signed:
+                sender_name = signed[0]
+                if len(signed) > 1:
+                    sender_company = signed[1]
         pj["app_sender_name"] = sender_name
         pj["app_sender_company"] = sender_company
         pj["app_from_email"] = (os.getenv("SENDER_EMAIL") or "").strip().lower()
@@ -181,9 +195,12 @@ def _builtin_rows() -> list[dict[str, Any]]:
 def seed_builtin_profiles(conn) -> None:
     for row in _builtin_rows():
         existing = conn.execute(
-            "SELECT id FROM profiles WHERE id = ?", (row["id"],)
+            "SELECT id, profile_json FROM profiles WHERE id = ?", (row["id"],)
         ).fetchone()
         if existing:
+            saved = db.loads(existing["profile_json"], {})
+            if saved.get("app_edited"):
+                continue
             conn.execute(
                 """
                 UPDATE profiles
@@ -260,8 +277,14 @@ def _profile_dto(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def create_profile(conn, payload: dict[str, Any]) -> dict[str, Any]:
-    """Build an engine-shaped profile from the Add profile form."""
+_SENDER_FORM_LABELS = {"Name", "Company", "Current work", "Desired outcome", "Product"}
+
+
+def _form_profile_json(
+    payload: dict[str, Any],
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map the Add/Edit form onto an engine profile. Extra brief fields stay."""
     name = str(payload.get("name") or "").strip()
     if not name:
         raise ValueError("name is required")
@@ -290,22 +313,39 @@ def create_profile(conn, payload: dict[str, Any]) -> dict[str, Any]:
     )
     sender_work = str(payload.get("senderWork") or "").strip()
     outcome = str(payload.get("desiredOutcome") or "").strip()
+    prior = existing or {}
+    prior_block = str(prior.get("sender_block") or "")
+    extras = [
+        ln
+        for ln in prior_block.splitlines()
+        if ln.startswith("- ")
+        and ln[2:].split(":", 1)[0] not in _SENDER_FORM_LABELS
+    ]
+    block_lines = [
+        "=== SENDER (verified for this campaign) ===",
+        f"- Name: {sender_name}",
+        f"- Company: {sender_company}",
+        f"- Current work: {sender_work or what}",
+        f"- Desired outcome: {outcome}",
+    ]
+    if not any(ln.startswith("- Constraints:") for ln in extras):
+        block_lines.append(
+            "- Constraints: no fabricated customers or metrics; research facts only"
+        )
+    block_lines.extend(extras)
+    block_lines.append("=== end sender ===")
+
+    context = str(payload.get("productContext") or "").strip()
+    if not context:
+        context = str(prior.get("product_context") or "").strip() or what
 
     profile_json: dict[str, Any] = {
         "profile_kind": TEMPLATES[template]["profile_kind"],
         "email_mode": TEMPLATES[template]["email_mode"],
         "product_name": name,
-        "product_context": str(payload.get("productContext") or what),
+        "product_context": context,
         "sign_off": sign_off,
-        "sender_block": (
-            "=== SENDER (verified for this campaign) ===\n"
-            f"- Name: {sender_name}\n"
-            f"- Company: {sender_company}\n"
-            f"- Current work: {sender_work or what}\n"
-            f"- Desired outcome: {outcome}\n"
-            "- Constraints: no fabricated customers or metrics; research facts only\n"
-            "=== end sender ==="
-        ),
+        "sender_block": "\n".join(block_lines),
         "discovery": {
             "product_name": name,
             "what_it_does": what,
@@ -320,11 +360,41 @@ def create_profile(conn, payload: dict[str, Any]) -> dict[str, Any]:
         },
         "app_sender_name": sender_name,
         "app_sender_company": sender_company,
-        "app_from_email": str(payload.get("fromEmail") or os.getenv("SENDER_EMAIL") or "")
+        "app_from_email": str(
+            payload.get("fromEmail")
+            or prior.get("app_from_email")
+            or os.getenv("SENDER_EMAIL")
+            or ""
+        )
         .strip()
         .lower(),
         "app_template": template,
     }
+    if prior.get("keep_sign_off"):
+        profile_json["keep_sign_off"] = True
+    if prior.get("angles"):
+        profile_json["angles"] = prior["angles"]
+    old_disc = prior.get("discovery") or {}
+    for key in (
+        "evidence_families",
+        "search_query_examples",
+        "signal_ontology",
+        "channel_limit_ratios",
+    ):
+        if key in old_disc:
+            profile_json["discovery"][key] = old_disc[key]
+    if existing is not None:
+        profile_json["app_edited"] = True
+    return profile_json
+
+
+def create_profile(conn, payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an engine-shaped profile from the Add profile form."""
+    profile_json = _form_profile_json(payload)
+    name = profile_json["product_name"]
+    sender_name = profile_json["app_sender_name"]
+    sender_company = profile_json["app_sender_company"]
+    template = profile_json["app_template"]
 
     base = slugify(name)
     pid = base
@@ -355,6 +425,39 @@ def create_profile(conn, payload: dict[str, Any]) -> dict[str, Any]:
     )
     conn.commit()
     return get_profile(conn, pid)  # type: ignore[return-value]
+
+
+def update_profile(conn, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    current = conn.execute(
+        "SELECT * FROM profiles WHERE id = ?", (profile_id,)
+    ).fetchone()
+    if not current:
+        raise ValueError(f"Unknown profile '{profile_id}'.")
+    existing = db.loads(current["profile_json"], {})
+    profile_json = _form_profile_json(payload, existing)
+    name = profile_json["product_name"]
+    conn.execute(
+        """
+        UPDATE profiles
+           SET name = ?, product_name = ?, hunt_description = ?,
+               sender_name = ?, sender_company = ?, from_email = ?,
+               default_template = ?, profile_json = ?
+         WHERE id = ?
+        """,
+        (
+            name,
+            name,
+            str(payload.get("buyers") or ""),
+            profile_json["app_sender_name"],
+            profile_json["app_sender_company"],
+            profile_json["app_from_email"],
+            profile_json["app_template"],
+            db.dumps(profile_json),
+            profile_id,
+        ),
+    )
+    conn.commit()
+    return get_profile(conn, profile_id)  # type: ignore[return-value]
 
 
 def _lines(value: Any) -> list[str]:

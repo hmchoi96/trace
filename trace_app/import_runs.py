@@ -24,6 +24,7 @@ LIST_TO_PROFILE = {
     "myzel": "myzel",
     "myzel_pet": "myzel_pet",
     "oneaway": "oneaway",
+    "keycard": "keycard",
 }
 
 
@@ -116,7 +117,7 @@ def import_cost_logs(conn) -> int:
         base = os.path.basename(path)
         parts = base.replace("research_cost_", "").replace(".jsonl", "").split("_")
         profile_id = ""
-        for key in ("akashic", "helix", "myzel_pet", "myzel", "oneaway", "problem_validation"):
+        for key in ("akashic", "helix", "myzel_pet", "myzel", "oneaway", "keycard", "problem_validation"):
             if key in parts:
                 profile_id = LIST_TO_PROFILE.get(key, key)
                 break

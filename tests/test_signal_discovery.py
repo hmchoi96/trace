@@ -168,6 +168,19 @@ def test_oneaway_profile_is_separate_from_akashic_and_helix():
     assert PRODUCT_PROFILES["oneaway"]["email_mode"] == "trace_strategy_email"
 
 
+def test_keycard_profile_is_an_applicant_sample():
+    kc = discovery_context_from_profile(PRODUCT_PROFILES["keycard"])
+    assert LIST_TO_PROFILE["keycard"] == "keycard"
+    assert kc["product_name"] == "Keycard"
+    brief = discovery_prompt(kc, 5, "web")
+    assert "standing" in brief
+    assert "Helix" not in brief
+    ctx = PRODUCT_PROFILES["keycard"]["product_context"]
+    assert "not a message from the company" in ctx
+    assert "Do not write as an employee" in ctx
+    assert PRODUCT_PROFILES["keycard"]["sign_off"].endswith("Keycard SDR applicant")
+
+
 def test_rank_prefer_web_puts_company_page_ahead_of_x():
     web = _sig(
         source="web",

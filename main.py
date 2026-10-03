@@ -80,6 +80,7 @@ from trace_first_touch import (
     with_first_touch_critique_checks,
     with_first_touch_rules,
 )
+from trace_followup import apply_to_critique_prompts, apply_to_draft_prompts
 from trace_style_prompts import (
     CRITIQUE_PLAIN_TEMPLATE,
     CRITIQUE_SHORT_TEMPLATE,
@@ -941,6 +942,115 @@ PRODUCT_PROFILES = {
             "prefer_web": True,
         },
     },
+    "keycard": {
+        "profile_kind": "problem_validation",
+        "email_mode": "trace_strategy_email",
+        "keep_sign_off": True,
+        "product_name": "Keycard",
+        "product_context": (
+            "Keycard (keycard.ai, Keycard Labs). Internal brief. Do not dump this "
+            "into the email.\n"
+            "\n"
+            "WHAT IT IS: Runtime authorization for AI agents. Each agent gets its "
+            "own identity. At request time Keycard checks policy and, only if "
+            "allowed, issues a short-lived credential scoped to that task. A denial "
+            "is logged and no credential is created. It federates the IdP they "
+            "already run (Okta, Entra, Google, Auth0). It does not replace it. "
+            "Policy is Cedar. Fit points: a few lines in the app, a gateway, or a "
+            "sidecar so the agent never holds a real secret.\n"
+            "\n"
+            "WHO TO WRITE: Developers shipping agents, plus platform, security, and "
+            "AI platform leads putting agents on production tools (MCP servers, "
+            "APIs, GitHub, Slack, internal data). Skip other identity or agent-auth "
+            "vendors, and anyone posting about agents with no production access.\n"
+            "\n"
+            "TRIGGER TO INFER: agents are about to touch real systems and access "
+            "is still standing, inherited from a person or a shared service account, "
+            "or unauditable. They do not need to have asked for agent IAM.\n"
+            "\n"
+            "EMAIL SHAPE: one observed production-agent fact (from FACTS only) → "
+            "one line on what Keycard would change about that access, said as a "
+            "candidate's read → one short sentence that you are applying for the "
+            "Keycard SDR role and this note is a sample, not a message from the "
+            "company → one low-friction ask. Do not write as an employee. Do not "
+            "say we or our for Keycard. Do not offer a demo on the company's behalf.\n"
+            "\n"
+            "Chime is a public customer. Do not invent others, and do not name Chime "
+            "unless the facts make it relevant. Never invent metrics. Call the "
+            "product Keycard."
+        ),
+        "sign_off": "Hyunmyung Choi\nKeycard SDR applicant",
+        "sender_block": (
+            "=== SENDER (verified for this campaign) ===\n"
+            "- Name: use the sign-off first line\n"
+            "- Status: applying for the SDR role at Keycard. Not an employee.\n"
+            "- Product being researched: Keycard, runtime authorization for agents\n"
+            "- Desired outcome: a sample note the founding AE can read\n"
+            "- The body must say, in one short sentence, that this is an application "
+            "sample and not a message from Keycard\n"
+            "- Constraints: do not claim employment; do not say we or our for Keycard; "
+            "no fabricated customers or metrics; public FACTS only; do not write "
+            "like AI found them\n"
+            "=== end sender ==="
+        ),
+        "discovery": {
+            "product_name": "Keycard",
+            "what_it_does": (
+                "Runtime auth for AI agents: own identity, policy check at request "
+                "time, short-lived scoped credential only if access is allowed."
+            ),
+            "target_users_or_buyers": (
+                "Developers building agents, and platform, security, or AI platform "
+                "leads at companies bringing agents onto production tools, APIs, MCP "
+                "servers, or internal data."
+            ),
+            "problems_it_solves": [
+                "Agents inherit a human or shared service-account token",
+                "Standing credentials that outlive the task",
+                "No way to tell whether a person or an agent took an action",
+                "Human approval on every agent action does not scale",
+                "Provisioning every permission an agent might need",
+                "Many MCP servers or APIs and no single place policy is applied",
+            ],
+            "examples_of_problem_signals": [
+                "Our agent uses a service account with standing access to prod",
+                "We cannot tell from the logs if that was the agent or the user",
+                "Every new MCP server gets a long-lived token",
+                "We are putting agents on GitHub, Slack, and internal APIs and access is still the human's",
+                "Security wants agents in production but will not hand them a shared secret",
+                "Manual approval on each tool call is already too slow",
+            ],
+            "obvious_non_targets_or_adjacent_vendors": [
+                "Vendors selling agent identity, MCP gateways, IAM, or secrets management",
+                "Okta, Auth0, CyberArk, or similar sellers pitching the same buyer",
+                "People talking about agents with no production system in reach",
+                "Keycard employees",
+                "Consultants describing agent security without owning the workflow",
+            ],
+            "qualification_question": (
+                "Does this team have agents, or agents about to ship, that need "
+                "access to real systems without a standing credential?"
+            ),
+            "search_guidance": (
+                "Do not hunt for people asking for agent IAM. Hunt for teams putting "
+                "agents on production tools — MCP, internal APIs, GitHub, Slack, "
+                "prod data — where access is still a standing key, a human's token, "
+                "or a shared service account. Prefer a named developer, platform "
+                "lead, or security lead. Company engineering blogs, job posts for "
+                "agent platform or AI security, and docs beat Twitter chatter."
+            ),
+            "evidence_families": (
+                "A. AGENTS_IN_PROD — shipping agents, MCP servers, or internal agents on real tools.\n"
+                "B. STANDING_ACCESS — long-lived tokens, shared service accounts, agents using a human credential.\n"
+                "C. ATTRIBUTION — cannot tell a person from an agent in the audit log.\n"
+                "D. SCALE — many MCP servers or IdPs, or human approval on every action that does not scale.\n"
+                "E. OWNER — a platform, security, or AI platform person responsible for that access."
+            ),
+            "search_channels": ["web", "x"],
+            "channel_limit_ratios": {"web": 1.0, "x": 0.35},
+            "prefer_web": True,
+        },
+    },
 }
 
 
@@ -951,6 +1061,7 @@ LIST_TO_PROFILE = {
     "myzel": "myzel",
     "myzel_pet": "myzel_pet",
     "oneaway": "oneaway",
+    "keycard": "keycard",
 }
 
 LEAD_LISTS = {
@@ -960,6 +1071,7 @@ LEAD_LISTS = {
     "myzel": "myzel_list.csv",
     "myzel_pet": "myzel_pet_list.csv",
     "oneaway": "oneaway_list.csv",
+    "keycard": "keycard_list.csv",
 }
 
 
@@ -1321,6 +1433,10 @@ def claude_draft_email(
             user_message = base_message
         system_prompt = _build_system_prompt(question_style, profile)
 
+    system_prompt, user_message = apply_to_draft_prompts(
+        profile, system_prompt, user_message
+    )
+
     max_tokens = 4096 if (
         uses_template and mode == "trace_strategy_email"
     ) else 768
@@ -1554,6 +1670,10 @@ def claude_critique_email(
     )
     if derived:
         user_message += f"\nDERIVED (tone only):\n{json.dumps(derived, ensure_ascii=False)}\n"
+
+    system_prompt, user_message = apply_to_critique_prompts(
+        profile, system_prompt, user_message
+    )
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -2001,7 +2121,7 @@ def _parse_args():
         choices=list(LEAD_LISTS.keys()),
         default="akashic",
         dest="list_name",
-        help="Lead list: akashic | problem_validation | helix | myzel | myzel_pet | oneaway.",
+        help="Lead list: akashic | problem_validation | helix | myzel | myzel_pet | oneaway | keycard.",
     )
     parser.add_argument(
         "--start", type=int, default=1,

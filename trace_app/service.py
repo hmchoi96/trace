@@ -1098,6 +1098,7 @@ def create_draft(
     candidate_id: str,
     *,
     template_id: str | None = None,
+    followup: bool = False,
     drafter: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     from trace_drafting import enrich_lead_from_candidate
@@ -1115,11 +1116,27 @@ def create_draft(
     snapshot = _snapshot_for(conn, cand, profile)
     guards.assert_snapshot_matches(snapshot, profile["profile"])
 
-    tid = template_id or profile["defaultTemplate"]
+    previous_send = None
+    if followup:
+        previous_send = latest_send(conn, candidate_id)
+        if not previous_send:
+            raise guards.GuardError(
+                "not_sent", "Send the first email before writing a follow-up."
+            )
+        # Short Discovery JSON, not a second first-touch strategy draft.
+        tid = "short"
+    else:
+        tid = template_id or profile["defaultTemplate"]
     if tid not in profiles.TEMPLATES:
         raise guards.GuardError("bad_template", f"Unknown template '{tid}'.")
 
     engine_profile = profiles.engine_profile(snapshot, tid)
+    if previous_send:
+        engine_profile["previous_send"] = {
+            "subject": previous_send.get("subject") or "",
+            "body": previous_send.get("body") or "",
+            "sent_at": previous_send.get("sent_at") or "",
+        }
     lead = enrich_lead_from_candidate(rec)
     build = drafter or drafting.build_draft
     out = build(engine_profile, lead)
@@ -1316,6 +1333,14 @@ def latest_draft(conn, candidate_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def latest_send(conn, candidate_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM sends WHERE candidate_id = ? ORDER BY sent_at DESC LIMIT 1",
+        (candidate_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def list_hunts(conn, profile_id: str, limit: int = 20) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -1407,10 +1432,7 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
     rec = db.loads(row["candidate_json"], {})
     outreach = classify_outreach(rec)
     draft = latest_draft(conn, row["id"])
-    send = conn.execute(
-        "SELECT * FROM sends WHERE candidate_id = ? ORDER BY sent_at DESC LIMIT 1",
-        (row["id"],),
-    ).fetchone()
+    send = latest_send(conn, row["id"])
     notes = conn.execute(
         "SELECT text, created_at FROM notes WHERE candidate_id = ? ORDER BY created_at ASC",
         (row["id"],),
@@ -1452,6 +1474,7 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "draft": _draft_dto(draft),
         "sentAt": send["sent_at"] if send else None,
         "sendMethod": send["method"] if send else None,
+        "lastSend": _send_dto(send),
         "notes": [{"text": n["text"], "at": n["created_at"]} for n in notes],
     }
 
@@ -1520,10 +1543,27 @@ def _draft_dto(draft: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _send_dto(send: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not send:
+        return None
+    return {
+        "subject": send.get("subject") or "",
+        "body": send.get("body") or "",
+        "sentAt": send.get("sent_at"),
+        "method": send.get("method"),
+    }
+
+
 def _status_of(row: dict[str, Any], draft: dict[str, Any] | None, send: Any) -> str:
     if row.get("outcome"):
         return row["outcome"]
     if send:
+        if draft and (draft.get("created_at") or "") > (send.get("sent_at") or ""):
+            ds = _draft_status(draft)
+            if ds == "failed":
+                return "draft_failed"
+            if ds == "ready":
+                return "followup"
         return "sent"
     if row["decision"] == "no":
         return "passed"

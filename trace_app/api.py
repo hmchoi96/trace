@@ -64,6 +64,7 @@ class DecisionRequest(BaseModel):
 
 class DraftRequest(BaseModel):
     templateId: Optional[str] = None
+    followup: bool = False
 
 
 class DraftEdit(BaseModel):
@@ -136,6 +137,11 @@ def list_profiles() -> list[dict[str, Any]]:
 @app.post("/api/profiles")
 def create_profile(payload: ProfileRequest) -> dict[str, Any]:
     return _guarded(profiles.create_profile, conn(), payload.model_dump())
+
+
+@app.put("/api/profiles/{profile_id}")
+def update_profile(profile_id: str, payload: ProfileRequest) -> dict[str, Any]:
+    return _guarded(profiles.update_profile, conn(), profile_id, payload.model_dump())
 
 
 @app.get("/api/profiles/{profile_id}/people")
@@ -215,7 +221,13 @@ def patch_contact(candidate_id: str, payload: ContactUpdate) -> dict[str, Any]:
 
 @app.post("/api/candidates/{candidate_id}/draft")
 def draft(candidate_id: str, payload: DraftRequest) -> dict[str, Any]:
-    return _guarded(service.create_draft, conn(), candidate_id, template_id=payload.templateId)
+    return _guarded(
+        service.create_draft,
+        conn(),
+        candidate_id,
+        template_id=payload.templateId,
+        followup=payload.followup,
+    )
 
 
 @app.post("/api/candidates/{candidate_id}/outcome")

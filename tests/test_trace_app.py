@@ -157,6 +157,32 @@ def test_create_profile_builds_discovery_context(conn):
     assert ctx["search_channels"] == ["x", "web", "linkedin"]
 
 
+def test_edit_keeps_the_brief_the_form_does_not_show(conn):
+    updated = profiles.update_profile(
+        conn,
+        "keycard",
+        {
+            "name": "Keycard",
+            "whatItDoes": "Runtime auth for agents.",
+            "buyers": "Security leads putting agents on production tools",
+            "senderName": "Jamie Choi",
+            "senderCompany": "Keycard SDR applicant",
+            "signOff": "Jamie Choi, Keycard SDR applicant",
+            "template": "strategy",
+            "searchWeb": True,
+            "searchX": True,
+            "searchLinkedin": False,
+            "preferWeb": True,
+        },
+    )
+    assert "not a message from the company" in updated["profile"]["product_context"]
+    assert "Not an employee" in updated["profile"]["sender_block"]
+    assert updated["huntDescription"] == "Security leads putting agents on production tools"
+    profiles.seed_builtin_profiles(conn)
+    again = profiles.get_profile(conn, "keycard")
+    assert again["huntDescription"] == "Security leads putting agents on production tools"
+
+
 # ── Human gate ──────────────────────────────────────────────────────────────
 
 
@@ -458,6 +484,84 @@ def test_double_click_sends_once(conn):
     assert first["alreadySent"] is False
     assert second["alreadySent"] is True
     assert len(calls) == 1
+
+
+def test_followup_draft_needs_a_first_send(conn):
+    cid, _draft_id = approved_with_draft(conn)
+    with pytest.raises(guards.GuardError) as err:
+        service.create_draft(conn, cid, followup=True, drafter=stub_draft())
+    assert err.value.code == "not_sent"
+
+
+def test_followup_draft_sees_the_first_email(conn):
+    cid, draft_id = approved_with_draft(conn)
+    service.send_draft(conn, draft_id, sender=ok_sender([]))
+    seen = {}
+
+    def spy(engine_profile, lead, **_kwargs):
+        seen["prev"] = engine_profile.get("previous_send")
+        seen["mode"] = engine_profile.get("email_mode")
+        return stub_draft()(engine_profile, lead)
+
+    service.create_draft(conn, cid, followup=True, drafter=spy)
+    assert seen["prev"]["subject"]
+    assert seen["prev"]["body"]
+    assert seen["mode"] == "problem_validation_email"
+    dto = service.candidate_dto(conn, service.get_candidate(conn, cid))
+    assert dto["status"] == "followup"
+    assert dto["sentAt"]
+    assert dto["lastSend"]["subject"]
+    assert dto["draft"]["subject"]
+
+
+def test_followup_send_writes_a_second_row(conn):
+    cid, draft_id = approved_with_draft(conn)
+    service.send_draft(conn, draft_id, sender=ok_sender([]))
+
+    def followup_draft(engine_profile, lead, **_kwargs):
+        return {
+            "subject": "Re: note for Dana",
+            "body": "Did that land, or is the list still rebuilt by hand?",
+            "verdict": "pass",
+            "critique": {"total": 90},
+            "error": None,
+        }
+
+    second = service.create_draft(conn, cid, followup=True, drafter=followup_draft)
+    calls = []
+    service.send_draft(conn, second["draftId"], sender=ok_sender(calls))
+    rows = conn.execute(
+        "SELECT subject FROM sends WHERE candidate_id = ? ORDER BY sent_at ASC",
+        (cid,),
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[1]["subject"] == "Re: note for Dana"
+    dto = service.candidate_dto(conn, service.get_candidate(conn, cid))
+    assert dto["status"] == "sent"
+    assert dto["lastSend"]["subject"] == "Re: note for Dana"
+
+
+def test_followup_prompt_prepends_the_previous_email():
+    from trace_followup import apply_to_draft_prompts
+
+    system, user = apply_to_draft_prompts(
+        {"previous_send": {"subject": "hello", "body": "first note", "sent_at": "t"}},
+        "SYSTEM",
+        "USER",
+    )
+    assert "FOLLOW-UP" in system
+    assert "first note" in user
+    assert user.endswith("USER")
+
+
+def test_keycard_sign_off_says_applicant_not_employee(monkeypatch):
+    monkeypatch.setenv("SENDER_FULL_NAME", "Jamie Choi")
+    monkeypatch.setenv("SENDER_COMPANY", "Wiserbond Technologies Inc.")
+    from main import PRODUCT_PROFILES
+
+    assert profiles.sign_off_for(PRODUCT_PROFILES["keycard"]) == (
+        "Jamie Choi\nKeycard SDR applicant"
+    )
 
 
 def test_send_is_blocked_when_the_mailbox_is_not_the_profile_sender(conn, monkeypatch):

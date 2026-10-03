@@ -123,8 +123,16 @@ function rowTone(person: Person): Tone {
   if (person.status === "disqualified") return "danger";
   if (person.status === "sent") return "info";
   if (person.status === "closed") return "neutral";
-  if (person.status === "draft") return "warning";
+  if (person.status === "draft" || person.status === "followup") return "warning";
   return "neutral";
+}
+
+function isFollowupDraft(person: Person): boolean {
+  return Boolean(
+    person.sentAt &&
+      person.draft?.createdAt &&
+      person.draft.createdAt > person.sentAt,
+  );
 }
 
 function TableListHandle({
@@ -388,7 +396,7 @@ function RecordDetail({
   onSentMyself: (person: Person) => void;
   onPullContact: (person: Person) => void;
   onSaveContact: (personId: string, contact: { email: string; phone: string }) => Promise<void>;
-  onRewriteDraft: (personId: string, templateId: string) => Promise<void>;
+  onRewriteDraft: (personId: string, templateId: string, followup?: boolean) => Promise<void>;
   onNote: (person: Person, text: string) => Promise<void>;
   onOutcome: (person: Person, outcome: "closed" | "disqualified") => void;
   actionError: string | null;
@@ -396,8 +404,11 @@ function RecordDetail({
   pullingContact: boolean;
 }) {
   const [noteDraft, setNoteDraft] = useState("");
+  const [writingFollowup, setWritingFollowup] = useState(false);
   const mailed = Boolean(person.sentAt);
   const mailboxReady = Boolean(health?.mailboxReady);
+  const followupDraft = isFollowupDraft(person);
+  const showComposer = (canMarkSent(person) && !mailed) || followupDraft;
 
   useEffect(() => {
     setNoteDraft("");
@@ -433,30 +444,50 @@ function RecordDetail({
               </Callout>
             )}
 
-            {mailed && person.draft?.subject && (
+            {mailed && person.lastSend?.subject && (
               <Stack gap={4}>
                 <Text size="small" tone="tertiary">
-                  {person.sendMethod === "self"
+                  {person.lastSend.method === "self"
                     ? "You sent this from your inbox"
                     : `Sent by Trace as ${from}`}
+                  {person.lastSend.sentAt ? ` · ${timestamp(person.lastSend.sentAt)}` : ""}
                 </Text>
-                <Text weight="semibold">{person.draft.subject}</Text>
-                {person.draft.body && <Text>{person.draft.body}</Text>}
+                <Text weight="semibold">{person.lastSend.subject}</Text>
+                {person.lastSend.body && <Text>{person.lastSend.body}</Text>}
               </Stack>
             )}
 
-            {canMarkSent(person) && !mailed && (
+            {mailed && !followupDraft && person.status !== "closed" && person.status !== "disqualified" && (
+              <Row gap={8} wrap>
+                <Button
+                  variant="secondary"
+                  disabled={busy || writingFollowup}
+                  onClick={() => {
+                    setWritingFollowup(true);
+                    void onRewriteDraft(person.id, "short", true).finally(() =>
+                      setWritingFollowup(false),
+                    );
+                  }}
+                >
+                  {writingFollowup ? "Writing…" : "Write follow-up"}
+                </Button>
+              </Row>
+            )}
+
+            {showComposer && (
               <>
-                <DraftTemplatePicker
-                  person={person}
-                  profile={profile}
-                  templates={templates}
-                  busy={busy}
-                  onRewrite={onRewriteDraft}
-                />
+                {!followupDraft && (
+                  <DraftTemplatePicker
+                    person={person}
+                    profile={profile}
+                    templates={templates}
+                    busy={busy}
+                    onRewrite={onRewriteDraft}
+                  />
+                )}
 
                 <Stack gap={8}>
-                  <H3>Draft Trace wrote</H3>
+                  <H3>{followupDraft ? "Follow-up Trace wrote" : "Draft Trace wrote"}</H3>
                   {person.status === "draft_failed" && (
                     <Callout tone="warning" title="Draft failed">
                       {person.draft?.error || "Trace could not produce a draft."}
@@ -479,12 +510,28 @@ function RecordDetail({
                       To {person.email} · {person.emailSource || "Unknown source"}
                     </Text>
                   )}
-                  {person.draft?.templateId && (
+                  {person.draft?.templateId && !followupDraft && (
                     <Text size="small" tone="tertiary">
                       Template:{" "}
                       {templates.find((t) => t.id === person.draft?.templateId)?.label ??
                         person.draft.templateId}
                     </Text>
+                  )}
+                  {followupDraft && (
+                    <Row gap={8} wrap>
+                      <Button
+                        variant="secondary"
+                        disabled={busy || writingFollowup}
+                        onClick={() => {
+                          setWritingFollowup(true);
+                          void onRewriteDraft(person.id, "short", true).finally(() =>
+                            setWritingFollowup(false),
+                          );
+                        }}
+                      >
+                        {writingFollowup ? "Writing…" : "Rewrite follow-up"}
+                      </Button>
+                    </Row>
                   )}
                   <Text size="small" tone="tertiary">
                     Subject
@@ -527,9 +574,11 @@ function RecordDetail({
                       >
                         Send this
                       </Button>
-                      <Button variant="ghost" onClick={() => onSentMyself(person)} disabled={busy}>
-                        I&apos;ll write it myself
-                      </Button>
+                      {!followupDraft && (
+                        <Button variant="ghost" onClick={() => onSentMyself(person)} disabled={busy}>
+                          I&apos;ll write it myself
+                        </Button>
+                      )}
                     </Row>
                   )}
                 </Stack>
@@ -676,7 +725,7 @@ export function Records({
   onPullContact: (person: Person) => void;
   onPullContactsBulk: (people: Person[]) => void | Promise<void>;
   onSaveContact: (personId: string, contact: { email: string; phone: string }) => Promise<void>;
-  onRewriteDraft: (personId: string, templateId: string) => Promise<void>;
+  onRewriteDraft: (personId: string, templateId: string, followup?: boolean) => Promise<void>;
   onRefresh: () => void;
   actionError: string | null;
   busy: boolean;

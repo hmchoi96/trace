@@ -40,6 +40,7 @@ export type PersonStatus =
   | "approved"
   | "draft"
   | "draft_failed"
+  | "followup"
   | "sent"
   | "passed"
   | "closed"
@@ -98,6 +99,12 @@ export type Person = {
   draft: Draft | null;
   sentAt: string | null;
   sendMethod: "trace" | "self" | null;
+  lastSend: {
+    subject: string;
+    body: string;
+    sentAt: string | null;
+    method: "trace" | "self" | null;
+  } | null;
   notes: { text: string; at: string }[];
 };
 
@@ -292,6 +299,11 @@ export const api = {
   templates: () => request<Template[]>("/api/templates"),
   profiles: () => request<Profile[]>("/api/profiles"),
   createProfile: (payload: ProfilePayload) => post<Profile>("/api/profiles", payload),
+  updateProfile: (profileId: string, payload: ProfilePayload) =>
+    request<Profile>(`/api/profiles/${encodeURIComponent(profileId)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
   people: (profileId: string) =>
     request<Person[]>(`/api/profiles/${encodeURIComponent(profileId)}/people`),
   hunts: async (profileId: string, limit = 20) => {
@@ -318,10 +330,10 @@ export const api = {
       `/api/candidates/${encodeURIComponent(id)}/decision`,
       { decision, reason },
     ),
-  draft: (id: string, templateId?: string) =>
+  draft: (id: string, templateId?: string, followup?: boolean) =>
     post<{ candidateId: string; draftId: string; verdict: string }>(
       `/api/candidates/${encodeURIComponent(id)}/draft`,
-      { templateId },
+      { templateId, followup: Boolean(followup) },
     ),
   pullContact: (id: string) =>
     post<{

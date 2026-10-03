@@ -26,6 +26,7 @@ export function actorLabel(person: Person): string {
 
 export function statusLabel(status: PersonStatus): string {
   if (status === "sent") return "Sent";
+  if (status === "followup") return "Follow-up, not sent";
   if (status === "draft") return "Draft, not sent";
   if (status === "draft_failed") return "Draft failed";
   if (status === "approved") return "Approved, no draft yet";
@@ -71,6 +72,7 @@ export function foundOnLabel(person: Person): string {
 export function lastEvent(person: Person): string {
   if (person.status === "disqualified") return event("Disqualified", person.decidedAt);
   if (person.status === "closed") return "Closed";
+  if (person.status === "followup") return event("Follow-up draft", person.draft?.createdAt);
   if (person.sentAt && person.sendMethod === "self") return event("You sent", person.sentAt);
   if (person.sentAt) return event("Sent", person.sentAt);
   if (person.status === "draft") return event("Draft since", person.draft?.createdAt);

@@ -31,9 +31,9 @@ import { HuntDrafts } from "../screens/HuntDrafts";
 import { HuntSend, type SendResult } from "../screens/HuntSend";
 import { Records } from "../screens/Records";
 import { CostScreen } from "../screens/CostScreen";
-import { AddProfile } from "../screens/AddProfile";
+import { AddProfile, draftFromProfile } from "../screens/AddProfile";
 
-type Mode = "hunt" | "records" | "cost" | "add";
+type Mode = "hunt" | "records" | "cost" | "add" | "edit";
 type Screen = "home" | "find" | "review" | "drafts" | "send";
 
 const HUNT_STEPS: { id: Screen; label: string }[] = [
@@ -406,8 +406,8 @@ export default function TracePage() {
     }
   }
 
-  async function rewriteDraft(personId: string, templateId: string) {
-    await api.draft(personId, templateId);
+  async function rewriteDraft(personId: string, templateId: string, followup?: boolean) {
+    await api.draft(personId, templateId, followup);
     if (huntId) setHunt(await api.hunt(huntId));
     if (profileId) void loadPeople(profileId);
   }
@@ -582,6 +582,13 @@ export default function TracePage() {
     setMode("records");
   }
 
+  async function saveProfile(payload: ProfilePayload) {
+    if (!profileId) return;
+    await api.updateProfile(profileId, payload);
+    setProfiles(await api.profiles());
+    setMode("records");
+  }
+
   function switchProfile(id: string) {
     setProfileId(id);
     setMode("records");
@@ -633,30 +640,36 @@ export default function TracePage() {
           )}
         </Stack>
 
-        <Row gap={8} wrap align="center">
-          {profiles.map((option) => (
-            <Pill
-              key={option.id}
-              active={mode !== "add" && profileId === option.id}
-              onClick={() => switchProfile(option.id)}
-            >
-              {option.name}
+        <Stack gap={8}>
+          <Row gap={8} wrap align="center">
+            {profiles.map((option) => (
+              <Pill
+                key={option.id}
+                active={mode !== "add" && mode !== "edit" && profileId === option.id}
+                onClick={() => switchProfile(option.id)}
+              >
+                {option.name}
+              </Pill>
+            ))}
+            <Pill active={mode === "add"} onClick={() => setMode("add")}>
+              Add profile
             </Pill>
-          ))}
-          <Pill active={mode === "add"} onClick={() => setMode("add")}>
-            Add profile
-          </Pill>
-          <Spacer />
-          <Pill active={mode === "hunt"} onClick={() => setMode("hunt")}>
-            New hunt
-          </Pill>
-          <Pill active={mode === "records"} onClick={() => setMode("records")}>
-            People and history
-          </Pill>
-          <Pill active={mode === "cost"} onClick={() => setMode("cost")}>
-            Cost
-          </Pill>
-        </Row>
+            <Pill active={mode === "edit"} onClick={() => setMode("edit")}>
+              Edit profile
+            </Pill>
+          </Row>
+          <Row gap={8} wrap align="center">
+            <Pill active={mode === "hunt"} onClick={() => setMode("hunt")}>
+              New hunt
+            </Pill>
+            <Pill active={mode === "records"} onClick={() => setMode("records")}>
+              People and history
+            </Pill>
+            <Pill active={mode === "cost"} onClick={() => setMode("cost")}>
+              Cost
+            </Pill>
+          </Row>
+        </Stack>
 
         {dataError && (
           <Callout tone="danger" title="Trace could not load this profile">
@@ -843,6 +856,19 @@ export default function TracePage() {
           <AddProfile
             templates={templates}
             onSave={createProfile}
+            onCancel={() => setMode("records")}
+          />
+        )}
+
+        {mode === "edit" && (
+          <AddProfile
+            key={profile.id}
+            templates={templates}
+            initial={draftFromProfile(profile)}
+            heading={`Edit ${profile.name}`}
+            lede="Same brief as Add profile. People already in this campaign stay here."
+            saveLabel="Save changes"
+            onSave={saveProfile}
             onCancel={() => setMode("records")}
           />
         )}
