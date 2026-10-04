@@ -83,6 +83,18 @@ def build_draft(
     lead = dict(lead)
     lead["evidence_level"] = evidence_level_for(lead)
 
+    from trace_reply_reason import assess_reply_reason, followup_assessment, held_draft_result
+
+    if engine_profile.get("previous_send"):
+        assessment = followup_assessment()
+    else:
+        assessment = assess_reply_reason(lead, engine_profile)
+    lead["reply_reason"] = assessment
+    lead["outreach_motion"] = assessment.get("motion")
+    lead["draft_decision"] = assessment.get("draft_decision")
+    if assessment.get("draft_decision") != "send_now":
+        return held_draft_result(assessment)
+
     derived = None
     # Optional campaign hints may be precomputed by callers; style templates stay
     # product-agnostic and do not branch on Helix vs other products.

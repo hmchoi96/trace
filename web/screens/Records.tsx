@@ -25,6 +25,7 @@ import {
 import type { Health, HuntSummary, Person, Profile, Template } from "../lib/api";
 import {
   actorLabel,
+  draftHeld,
   emailSourceLabel,
   formatDuration,
   formatEta,
@@ -493,7 +494,15 @@ function RecordDetail({
                       {person.draft?.error || "Trace could not produce a draft."}
                     </Callout>
                   )}
-                  {!person.draft?.body && person.status === "approved" && (
+                  {draftHeld(person) && !person.draft?.body && (
+                    <Callout tone="warning" title="Trace did not draft">
+                      {person.replyReason?.reason}
+                      {person.replyReason?.missing_evidence?.length
+                        ? ` Missing: ${person.replyReason.missing_evidence.join(", ")}.`
+                        : ""}
+                    </Callout>
+                  )}
+                  {!person.draft?.body && person.status === "approved" && !draftHeld(person) && (
                     <Callout tone="info" title="Trace is writing the draft">
                       Claude is drafting from your profile template and this person&apos;s
                       research. Usually takes a minute or two. This screen refreshes until the

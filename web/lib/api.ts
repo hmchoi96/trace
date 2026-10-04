@@ -91,6 +91,19 @@ export type Person = {
   outreachRole: string;
   recommendedAsk: string;
   secondaryRoles: string[];
+  outreachMotion?: string;
+  draftDecision?: string;
+  replyReason?: {
+    motion: string;
+    trigger_type: string;
+    reply_reason_level: string;
+    draft_decision: string;
+    reason: string;
+    missing_evidence: string[];
+    sender_asset: string;
+    active_occasion: string;
+    next_action: string;
+  } | null;
   recommendation: string;
   recommendationReason: string;
   linkedinUrl: string;

@@ -67,49 +67,96 @@ def _body_text(message: dict[str, Any]) -> str:
     return (b.get("content") or message.get("bodyPreview") or "") or ""
 
 
-def classify_reply_type(message: dict[str, Any]) -> str:
-    subj = (message.get("subject") or "").lower()
-    text = (
-        f"{message.get('bodyPreview', '')} {_body_text(message)} {subj}"
-    ).lower()
+def _message_text(message: dict[str, Any]) -> str:
+    subj = message.get("subject") or ""
+    return f"{message.get('bodyPreview', '')} {_body_text(message)} {subj}".lower()
 
-    ooo = (
+
+def classify_reply_quality(message: dict[str, Any]) -> str:
+    """positive, engaged, neutral, negative, automated, or unknown.
+
+    Automated mail is not a human reply and is not a success.
+    """
+    text = _message_text(message)
+    sender = _sender_addr(message)
+    automated = (
         "automatic reply",
         "out of office",
+        "out of the office",
         "away from the office",
         "autoresponder",
         "auto-reply",
         "自動返信",
+        "undeliverable",
+        "delivery status",
+        "delivery has failed",
+        "mailer-daemon",
+        "postmaster",
+        "this is an automated",
+        "this is an automatic",
+        "do not reply to this",
+        "thank you for applying",
+        "thanks for applying",
+        "application has been received",
+        "we received your application",
+        "your application was received",
+        "calendar invitation",
+        "accepted this invitation",
+        "declined this invitation",
+        "tentatively accepted",
+        "newsletter",
+        "view in browser",
     )
-    if any(x in text for x in ooo):
-        return "out_of_office"
-
-    neg = (
-        "unsubscribe",
-        "remove me",
+    if any(x in text for x in automated) or any(x in sender for x in ("mailer-daemon", "postmaster", "noreply", "no-reply")):
+        return "automated"
+    if not text.strip():
+        return "unknown"
+    negative = (
         "not interested",
+        "no thanks",
+        "remove me",
         "stop emailing",
         "do not contact",
+        "not a fit",
     )
-    if any(x in text for x in neg):
+    if any(x in text for x in negative):
         return "negative"
-
-    pos = (
-        "interested",
+    positive = (
+        "sounds interesting",
         "happy to chat",
-        "tell me more",
-        "worth a look",
-        "send it over",
         "let's talk",
         "lets talk",
-        "book a",
-        " schedule a",
-        " demo",
+        "impressive",
+        "worth a look",
+        "send it over",
+        "i'm interested",
+        "i am interested",
+        "availability",
     )
-    if any(x in text for x in pos):
+    if any(x in text for x in positive):
         return "positive"
-
+    if "tell me more" in text or "curious how" in text:
+        return "engaged"
+    if "?" in text and len(text.strip()) > 20:
+        return "engaged"
     return "neutral"
+
+
+def classify_reply_type(message: dict[str, Any]) -> str:
+    text = _message_text(message)
+    if any(
+        x in text
+        for x in ("out of office", "out of the office", "automatic reply", "away from the office", "auto-reply")
+    ):
+        return "out_of_office"
+    quality = classify_reply_quality(message)
+    if quality == "automated":
+        return "automated"
+    return quality
+
+
+def is_human_reply(message: dict[str, Any]) -> bool:
+    return classify_reply_quality(message) not in ("automated", "unknown")
 
 
 def _parse_iso(dt: str | None) -> datetime | None:
@@ -161,16 +208,30 @@ def load_sent_outreach(jsonl_path: str) -> list[dict[str, Any]]:
     return out
 
 
-def fetch_recent_inbox_messages(
+def reply_folders() -> tuple[str, ...]:
+    """Inbox only unless REPLY_TRACK_FOLDERS lists Graph folder names.
+
+    Example: inbox,archive,deleteditems
+    """
+    raw = (os.getenv("REPLY_TRACK_FOLDERS") or "inbox").strip()
+    parts = tuple(p.strip() for p in raw.split(",") if p.strip())
+    return parts or ("inbox",)
+
+
+def fetch_recent_folder_messages(
     since: datetime,
     *,
     token: str,
     mailbox: str,
+    folder: str = "inbox",
     top: int = 200,
 ) -> list[dict[str, Any]]:
-    """Messages in Inbox received on or after `since` (UTC)."""
+    """Messages in one Graph mail folder received on or after `since` (UTC)."""
     since_s = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-    base = f"https://graph.microsoft.com/v1.0/users/{mailbox}/mailFolders/inbox/messages"
+    base = (
+        f"https://graph.microsoft.com/v1.0/users/{mailbox}"
+        f"/mailFolders/{folder}/messages"
+    )
     params = {
         "$top": str(top),
         "$orderby": "receivedDateTime desc",
@@ -198,6 +259,43 @@ def fetch_recent_inbox_messages(
     return messages
 
 
+def fetch_recent_inbox_messages(
+    since: datetime,
+    *,
+    token: str,
+    mailbox: str,
+    top: int = 200,
+) -> list[dict[str, Any]]:
+    """Messages in Inbox received on or after `since` (UTC)."""
+    return fetch_recent_folder_messages(
+        since, token=token, mailbox=mailbox, folder="inbox", top=top
+    )
+
+
+def fetch_recent_messages(
+    since: datetime,
+    *,
+    token: str,
+    mailbox: str,
+    folders: tuple[str, ...] | None = None,
+    top: int = 200,
+) -> list[dict[str, Any]]:
+    """Scan configured folders. Default remains Inbox only."""
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for folder in folders or reply_folders():
+        for msg in fetch_recent_folder_messages(
+            since, token=token, mailbox=mailbox, folder=folder, top=top
+        ):
+            mid = str(msg.get("id") or "")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            found.append(msg)
+    return found
+
+
 def _domain(addr: str) -> str:
     addr = addr.strip().lower()
     if "@" in addr:
@@ -205,13 +303,24 @@ def _domain(addr: str) -> str:
     return ""
 
 
-def _subject_tokens_match(a: str, b: str) -> bool:
+def _subjects_equal(a: str, b: str) -> bool:
     na, nb = normalize_subject(a), normalize_subject(b)
-    if not na or not nb:
+    return bool(na) and na == nb
+
+
+def _subjects_related(a: str, b: str) -> bool:
+    na, nb = normalize_subject(a), normalize_subject(b)
+    if not na or not nb or na == nb:
         return False
-    if na == nb:
-        return True
     return na in nb or nb in na
+
+
+def _quotes_original(message: dict[str, Any], outreach: dict[str, Any]) -> bool:
+    body = _body_text(message).lower()
+    sent = " ".join(str(outreach.get("body") or "").split()).lower()
+    if len(sent) >= 40 and sent[:80] in body:
+        return True
+    return False
 
 
 def match_reply_to_outreach(
@@ -219,29 +328,19 @@ def match_reply_to_outreach(
     outreach: dict[str, Any],
 ) -> str | None:
     """
-    Return matched_by label if this Inbox message is a reply to the outreach; else None.
-    Order: conversation_id, sender_subject, domain_subject.
+    Match order:
+    conversation_id, sender_subject, domain_subject, quoted_original, manual_review.
+    Same subject alone does not match. Automated mail does not match.
     """
+    if not is_human_reply(message):
+        return None
+
     sender = _sender_addr(message)
     mailbox = (SENDER_EMAIL or "").strip().lower()
     if sender and mailbox and sender == mailbox:
         return None
 
-    if "mailer-daemon" in sender or "postmaster" in sender:
-        return None
     subj_m = message.get("subject") or ""
-    low = subj_m.lower()
-    if any(
-        x in low
-        for x in (
-            "undeliverable",
-            "delivery status",
-            "failure notice",
-            "returned mail",
-        )
-    ):
-        return None
-
     rec_time = _parse_iso(message.get("receivedDateTime"))
     sent_time = _sent_time(outreach)
     if rec_time and sent_time and rec_time < sent_time:
@@ -254,16 +353,105 @@ def match_reply_to_outreach(
         return "conversation_id"
 
     to_email = (outreach.get("to_email") or "").strip().lower()
-    if sender and to_email and sender == to_email:
-        if _subject_tokens_match(ours_sub, subj_m):
-            return "sender_subject"
-
-    if to_email and sender:
-        if _domain(sender) and _domain(sender) == _domain(to_email):
-            if _subject_tokens_match(ours_sub, subj_m):
-                return "domain_subject"
-
+    same_sender = bool(sender and to_email and sender == to_email)
+    same_domain = bool(
+        sender and to_email and _domain(sender) and _domain(sender) == _domain(to_email)
+    )
+    if same_sender and _subjects_equal(ours_sub, subj_m):
+        return "sender_subject"
+    if same_domain and _subjects_equal(ours_sub, subj_m):
+        return "domain_subject"
+    if _subjects_equal(ours_sub, subj_m) and _quotes_original(message, outreach):
+        return "quoted_original"
+    if same_domain and _subjects_related(ours_sub, subj_m):
+        return "manual_review"
     return None
+
+
+_MATCH_RANK = {
+    "conversation_id": 0,
+    "sender_subject": 1,
+    "domain_subject": 2,
+    "quoted_original": 3,
+    "manual_review": 4,
+}
+_HUMAN_MATCHES = ("conversation_id", "sender_subject", "domain_subject", "quoted_original")
+
+
+def apply_reply_matches(
+    rows: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach reply fields. Does not count automated mail as a human reply."""
+    attached: dict[int, list[tuple[dict[str, Any], str]]] = {}
+    for msg in messages:
+        best: tuple[int, int, str] | None = None
+        for i, rec in enumerate(rows):
+            if rec.get("sent") is not True:
+                continue
+            how = match_reply_to_outreach(msg, rec)
+            if not how:
+                continue
+            rank = _MATCH_RANK[how]
+            if best is None or rank < best[0] or (rank == best[0] and i < best[1]):
+                best = (rank, i, how)
+        if best:
+            attached.setdefault(best[1], []).append((msg, best[2]))
+
+    for row_i, pairs in attached.items():
+        pairs.sort(
+            key=lambda p: _parse_iso(p[0].get("receivedDateTime"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        human = [p for p in pairs if p[1] in _HUMAN_MATCHES]
+        rec = rows[row_i]
+        if not human:
+            rec["reply_status"] = "manual_review"
+            rec["reply_count"] = 0
+            rec["reply_quality"] = None
+            rec["reply_type"] = None
+            rec["matched_by"] = "manual_review"
+            rec["first_reply_at"] = None
+            rec["last_reply_at"] = None
+            rec["reply_from"] = None
+            rec["reply_subject"] = None
+            rec["reply_preview"] = None
+            continue
+        times = [
+            t
+            for t in (_parse_iso(p[0].get("receivedDateTime")) for p in human)
+            if t
+        ]
+        first_msg = human[0][0]
+        last_msg = human[-1][0]
+        quality = classify_reply_quality(first_msg)
+        rec["reply_status"] = "replied"
+        rec["reply_count"] = len(human)
+        rec["first_reply_at"] = min(times).isoformat() if times else None
+        rec["last_reply_at"] = max(times).isoformat() if times else None
+        rec["reply_from"] = _sender_addr(last_msg)
+        rec["reply_subject"] = last_msg.get("subject")
+        rec["reply_preview"] = (last_msg.get("bodyPreview") or "")[:500] or None
+        rec["reply_type"] = classify_reply_type(first_msg)
+        rec["reply_quality"] = quality
+        rec["matched_by"] = human[0][1]
+
+    for rec in rows:
+        if rec.get("sent") is not True:
+            continue
+        if rec.get("reply_status") in ("replied", "manual_review"):
+            continue
+        rec.setdefault("reply_status", "none")
+        rec.setdefault("reply_count", 0)
+        rec.setdefault("first_reply_at", None)
+        rec.setdefault("last_reply_at", None)
+        rec.setdefault("reply_from", None)
+        rec.setdefault("reply_subject", None)
+        rec.setdefault("reply_preview", None)
+        rec.setdefault("reply_type", None)
+        rec.setdefault("reply_quality", None)
+        rec.setdefault("matched_by", None)
+    return rows
 
 
 def update_outreach_records_with_replies(
@@ -300,77 +488,8 @@ def update_outreach_records_with_replies(
     )
 
     since = datetime.now(timezone.utc) - timedelta(days=max(1, since_days))
-    inbox = fetch_recent_inbox_messages(since, token=token, mailbox=SENDER_EMAIL or "")
-
-    # Collect matches: list of (row_index, message, matched_by)
-    attached: dict[int, list[tuple[dict[str, Any], str]]] = {}
-
-    rank_map = {"conversation_id": 0, "sender_subject": 1, "domain_subject": 2}
-
-    for msg in inbox:
-        best: tuple[int, int, str] | None = None  # rank, row_i, how
-        for i, rec in enumerate(all_rows):
-            if rec.get("sent") is not True:
-                continue
-            how = match_reply_to_outreach(msg, rec)
-            if not how:
-                continue
-            rank = rank_map[how]
-            if best is None:
-                best = (rank, i, how)
-            elif rank < best[0]:
-                best = (rank, i, how)
-            elif rank == best[0] and i < best[1]:
-                best = (rank, i, how)
-        if best:
-            row_i = best[1]
-            how = best[2]
-            attached.setdefault(row_i, []).append((msg, how))
-
-    # Aggregate per row
-    for row_i, pairs in attached.items():
-        pairs.sort(
-            key=lambda p: _parse_iso(p[0].get("receivedDateTime"))
-            or datetime.min.replace(tzinfo=timezone.utc),
-        )
-        times = [
-            _parse_iso(p[0].get("receivedDateTime"))
-            for p in pairs
-            if _parse_iso(p[0].get("receivedDateTime"))
-        ]
-        times = [t for t in times if t]
-        last_msg = pairs[-1][0]
-        first_at = min(times).isoformat() if times else None
-        last_at = max(times).isoformat() if times else None
-        rtype = classify_reply_type(last_msg)
-        matched_by = pairs[0][1]
-
-        rec = all_rows[row_i]
-        rec["reply_status"] = "replied"
-        rec["reply_count"] = len(pairs)
-        rec["first_reply_at"] = first_at
-        rec["last_reply_at"] = last_at
-        rec["reply_from"] = _sender_addr(last_msg)
-        rec["reply_subject"] = last_msg.get("subject")
-        rec["reply_preview"] = (last_msg.get("bodyPreview") or "")[:500] or None
-        rec["reply_type"] = rtype
-        rec["matched_by"] = matched_by
-
-    # Rows that were sent but still no match
-    for rec in all_rows:
-        if rec.get("sent") is not True:
-            continue
-        if rec.get("reply_status") == "replied":
-            continue
-        rec.setdefault("reply_status", "none")
-        rec.setdefault("reply_count", 0)
-        rec.setdefault("first_reply_at", None)
-        rec.setdefault("last_reply_at", None)
-        rec.setdefault("reply_from", None)
-        rec.setdefault("reply_subject", None)
-        rec.setdefault("reply_preview", None)
-        rec.setdefault("reply_type", None)
-        rec.setdefault("matched_by", None)
+    inbox = fetch_recent_messages(since, token=token, mailbox=SENDER_EMAIL or "")
+    apply_reply_matches(all_rows, inbox)
 
     with open(output_jsonl, "w", encoding="utf-8") as out:
         for rec in all_rows:

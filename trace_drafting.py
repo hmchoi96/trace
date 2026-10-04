@@ -44,7 +44,8 @@ TRACE_CRITIQUE_LOGIC = """
 - Em dash, missing closing, or other format breaks enforced here or by code
 
 ## Research alignment (hard_fail)
-- Preserve why_surfaced → outreach_role → recommended_ask
+- Preserve why_surfaced → outreach_role → recommended_ask → reply_reason → motion → draft_decision
+- A deterministic no_draft / research_more / strengthen_offer / change_recipient / use_different_channel decision is final
 - Respect evidence_level (context/workflow/friction/demand)
 - Evidence distance: do not turn firm-level or context signals into personal pain
 - Do not treat Expert / Researcher as Practitioner without evidence
@@ -56,6 +57,11 @@ TRACE_CRITIQUE_LOGIC = """
 - Opening = signal + why you are asking; no hollow praise hooks
 
 If Integrity or Alignment is violated, add a specific hard_fail.
+Reply-reason hard fails (integrity, not copy quality):
+topic_signal_used_as_action_trigger, no_verified_workflow_owner,
+question_without_reply_reason, meeting_before_value,
+sender_asset_not_verified, motion_structure_mismatch,
+draft_generated_despite_no_draft.
 """.strip()
 
 OUTREACH_ROLES = (
@@ -307,8 +313,14 @@ def _format_evidence_items(rec: dict[str, Any]) -> list[str]:
 def format_drafting_context_package(rec: dict[str, Any]) -> str:
     """Build the sole research input for drafting from Trace's existing research."""
     from trace_eval import evidence_drafting_guidance, evidence_level_for
+    from trace_reply_reason import assess_reply_reason, format_reply_reason_section
 
     outreach = classify_outreach(rec)
+    stored = rec.get("reply_reason")
+    if isinstance(stored, dict) and stored.get("draft_decision") and stored.get("trigger_type"):
+        assessment = stored
+    else:
+        assessment = assess_reply_reason(rec)
     role = outreach["outreach_role"]
     sections: list[str] = [
         TRACE_RESEARCH_POLICY,
@@ -366,6 +378,8 @@ def format_drafting_context_package(rec: dict[str, Any]) -> str:
         sections.append("- Classification axes: " + "; ".join(axis_bits))
     sections.extend([
         "",
+        format_reply_reason_section(assessment),
+        "",
         "=== OUTREACH ASK GUIDANCE ===",
         outreach_ask_guidance(role),
         "",
@@ -401,12 +415,39 @@ def enrich_lead_from_candidate(rec: dict[str, Any]) -> dict[str, Any]:
     ):
         if rec.get(key) not in (None, "", []):
             lead[key] = rec[key]
+    for key in (
+        "outreach_motion",
+        "trigger_type",
+        "role_open",
+        "relevant_proof",
+        "competency_proof",
+        "owns_or_influences",
+        "relationship_path",
+        "introducer",
+        "overlap",
+        "workflow_ownership_evidence",
+        "sender_asset",
+        "sender_asset_id",
+        "sender_asset_status",
+        "firsthand_evidence",
+        "novel_question",
+        "active_occasion",
+        "next_action",
+    ):
+        if key in rec:
+            lead[key] = rec[key]
     from trace_eval import evidence_level_for
 
     lead["evidence_level"] = evidence_level_for(rec)
     lead["outreach_role"] = outreach["outreach_role"]
     lead["secondary_roles"] = outreach["secondary_roles"]
     lead["recommended_ask"] = outreach["recommended_ask"]
+    from trace_reply_reason import assess_reply_reason
+
+    assessment = assess_reply_reason(lead)
+    lead["reply_reason"] = assessment
+    lead["outreach_motion"] = assessment["motion"]
+    lead["draft_decision"] = assessment["draft_decision"]
     first, _last = split_name(rec.get("name") or rec.get("author_name") or "")
     if first:
         lead["first_name"] = first

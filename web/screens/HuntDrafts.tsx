@@ -16,7 +16,7 @@ import {
   Text,
 } from "../components/ui";
 import type { Health, Hunt, Person, Profile, Template } from "../lib/api";
-import { senderLine } from "../lib/format";
+import { draftHeld, senderLine } from "../lib/format";
 
 function ContactLines({
   person,
@@ -134,6 +134,14 @@ function DraftCard({
           />
           <Divider />
 
+          {draftHeld(person) && (
+            <Callout tone="warning" title="Trace did not draft">
+              {person.replyReason.reason}
+              {person.replyReason.missing_evidence?.length
+                ? ` Missing: ${person.replyReason.missing_evidence.join(", ")}.`
+                : ""}
+            </Callout>
+          )}
           {!draft ? (
             <Callout tone="info" title="No draft yet">
               Trace looks up the contact and writes the draft in the background after a yes.

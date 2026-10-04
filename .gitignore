@@ -17,8 +17,12 @@ venv/
 .vscode/
 .DS_Store
 
-# Lead lists and run output (names, emails, research dossiers)
-*.csv
+# Lead lists and private mailbox exports. Example fixtures can still be committed.
+*_list.csv
+*.phones.csv
+private_outreach_data/
+jamie_historical_outreach_dataset.csv
+*outlook_history*.csv
 runs/
 research_cache.jsonl
 *.db

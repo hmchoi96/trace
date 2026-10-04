@@ -374,6 +374,8 @@ def _form_profile_json(
         profile_json["keep_sign_off"] = True
     if prior.get("angles"):
         profile_json["angles"] = prior["angles"]
+    if prior.get("sender_assets"):
+        profile_json["sender_assets"] = prior["sender_assets"]
     old_disc = prior.get("discovery") or {}
     for key in (
         "evidence_families",

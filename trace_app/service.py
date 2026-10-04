@@ -1138,6 +1138,19 @@ def create_draft(
             "sent_at": previous_send.get("sent_at") or "",
         }
     lead = enrich_lead_from_candidate(rec)
+    if not followup:
+        from trace_reply_reason import assess_reply_reason
+
+        assessment = assess_reply_reason(lead, engine_profile)
+        lead["reply_reason"] = assessment
+        lead["outreach_motion"] = assessment["motion"]
+        lead["draft_decision"] = assessment["draft_decision"]
+        rec["reply_reason"] = assessment
+        rec["outreach_motion"] = assessment["motion"]
+        conn.execute(
+            "UPDATE candidates SET candidate_json = ? WHERE id = ?",
+            (db.dumps(rec), cand["id"]),
+        )
     build = drafter or drafting.build_draft
     out = build(engine_profile, lead)
 
@@ -1431,6 +1444,11 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
 
     rec = db.loads(row["candidate_json"], {})
     outreach = classify_outreach(rec)
+    from trace_reply_reason import assess_reply_reason
+
+    reply = rec.get("reply_reason") if isinstance(rec.get("reply_reason"), dict) else None
+    if not reply or not reply.get("draft_decision"):
+        reply = assess_reply_reason(rec)
     draft = latest_draft(conn, row["id"])
     send = latest_send(conn, row["id"])
     notes = conn.execute(
@@ -1465,6 +1483,9 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "outreachRole": outreach["outreach_role"],
         "recommendedAsk": outreach["recommended_ask"],
         "secondaryRoles": outreach["secondary_roles"],
+        "outreachMotion": reply.get("motion") or "",
+        "draftDecision": reply.get("draft_decision") or "",
+        "replyReason": reply,
         "recommendation": rec.get("recommendation") or "",
         "recommendationReason": rec.get("recommendation_reason") or "",
         "linkedinUrl": rec.get("linkedin_url") or "",

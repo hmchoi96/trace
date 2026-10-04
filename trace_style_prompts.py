@@ -19,19 +19,21 @@ Product name: {product_name}
 {product_context}
 
 # STYLE RULES
-- Use one research-grounded observation or relevant personal context from the Profile.
-- Optionally one short line explaining what the sender is exploring or building,
-  using the product name above only when needed to make the ask understandable.
-- End with one focused question aligned to outreach_role and recommended_ask.
+- Start from the verified reply reason in the research package.
+- Then one relevant proof, or a sender asset the package marks verified.
+- Then one proportionate next action.
+- Observation → question only when motion is expert_research and the package
+  shows firsthand evidence plus a narrow question.
 - Do not pitch. Do not give a feature tour.
 - Do not assume the recipient personally experiences a problem unless the Trace
   research package supports that.
 - Do not invent company facts, metrics, posts, hiring, funding, or internal process.
+- Do not mention a teardown, replay, prototype, or analysis unless Verified sender asset names it.
 
 # STRUCTURE
 - Greet with Hi and the first name only.
-- Usually: one research-grounded observation → one question.
-- Add one product line only when the reader needs it to understand why you are asking.
+- Default: verified reply reason → one relevant proof or verified asset → one next action.
+- Do not ask a question when reply-reason level is topic_only or none.
 - Usually 2–4 short sentences total.
 
 # LENGTH
@@ -66,21 +68,24 @@ Product name: {product_name}
 {product_context}
 
 # STYLE RULES
-- Use mild uncertainty when the evidence is incomplete.
-  Communicate "I may be wrong" without repeating the same opener across leads.
-- Make one grounded observation or hypothesis from the Trace research package
-  (and Profile context only).
+- Name one verified fact from the research package.
+- Keep any inference to one level beyond that fact.
+- If the package only has a generic hypothesis, do not draft. The gate should
+  have returned research_more or no_draft.
+- Do not write "I may be wrong, but you probably struggle".
+- Do not turn a company or product fact into imagined pain.
 - Optionally one short line about {product_name} if it clarifies why you are writing.
-- End with one focused question aligned to outreach_role and recommended_ask.
+- One proportionate next action. A question is not the default.
 - Do not flatter. Do not pitch. Do not request a demo or meeting.
 - Do not pretend to know internal problems.
 - If the research is thin, say less.
 - Do not invent posts, news, metrics, funding, tech stack, or process.
+- Do not mention a teardown, replay, prototype, or analysis unless Verified sender asset names it.
 
 # STRUCTURE
 - Hi {{first_name}},
-- One careful guess / observation.
-- One question.
+- The verified fact, then at most one careful inference.
+- One next action that the reply reason already implies.
 - Usually 2–4 short sentences total.
 
 # LENGTH
@@ -122,6 +127,7 @@ what matches the product name or sign-off above.
 - Does it validate one thing?
 - Did it turn into a pitch or feature tour?
 - Is the question easy to understand and aligned to outreach_role / recommended_ask?
+- Does it follow reply reason → proof or verified asset → next action, unless motion is expert_research?
 
 # HARD FAILS (any one = hard fail)
 - Invents facts not supported by the research package / FACTS.
@@ -134,6 +140,13 @@ what matches the product name or sign-off above.
 - Subject longer than 7 words.
 - No signature / no closing lines at the end of the body.
 - Sign-off invents a different product line than the required sign-off above.
+- topic_signal_used_as_action_trigger
+- no_verified_workflow_owner
+- question_without_reply_reason
+- meeting_before_value
+- sender_asset_not_verified
+- motion_structure_mismatch
+- draft_generated_despite_no_draft
 **Do NOT put body length / 75-word limits in hard_fails.** Length is enforced by code.
 **Sign-off check:** only require the two lines shown above. Do not require Helix
 or any other product line unless it appears in that sign-off.
@@ -191,6 +204,7 @@ what matches the product name or sign-off above.
 - Does it make one grounded guess?
 - Does it sound overly polished or salesy?
 - Is the question aligned to outreach_role / recommended_ask?
+- Does cautious wording stay one level past a verified fact, rather than inventing pain?
 
 # HARD FAILS (any one = hard fail)
 - Invents facts not supported by the research package / FACTS.
@@ -203,6 +217,13 @@ what matches the product name or sign-off above.
 - Subject longer than 7 words.
 - No signature / no closing lines at the end of the body.
 - Sign-off invents a different product line than the required sign-off above.
+- topic_signal_used_as_action_trigger
+- no_verified_workflow_owner
+- question_without_reply_reason
+- meeting_before_value
+- sender_asset_not_verified
+- motion_structure_mismatch
+- draft_generated_despite_no_draft
 **Do NOT put body length / 75-word limits in hard_fails.** Length is enforced by code.
 **Sign-off check:** only require the two lines shown above. Do not require Helix
 or any other product line unless it appears in that sign-off.

@@ -1315,6 +1315,14 @@ def claude_draft_email(
     derived: dict | None = None,
     test_batch: str = "",
 ) -> dict:
+    from trace_reply_reason import ensure_may_draft, stamp_authoritative_decision
+
+    assessment = ensure_may_draft(lead, profile)
+    lead = dict(lead)
+    lead["reply_reason"] = assessment
+    lead["outreach_motion"] = assessment.get("motion")
+    lead["draft_decision"] = assessment.get("draft_decision")
+
     if not ANTHROPIC_API_KEY:
         raise EnvironmentError("ANTHROPIC_API_KEY is missing from .env")
 
@@ -1456,7 +1464,8 @@ def claude_draft_email(
     elif "subject" not in email or "body" not in email:
         raise ValueError("Claude response missing 'subject' or 'body' key")
 
-    return ensure_draft_sign_off(email, profile)
+    email = ensure_draft_sign_off(email, profile)
+    return stamp_authoritative_decision(email, assessment)
 
 
 # ─── Email Critique (legacy) ───────────────────────────────────────────────
@@ -1566,8 +1575,16 @@ Do not invent a different product line for the signature.
 - Buzzword-heavy value prop with no concrete outcome.
 - Message is primarily about the sender's need with little recipient value.
 - No signature / no closing lines at the end of the body.
+- topic_signal_used_as_action_trigger
+- no_verified_workflow_owner
+- question_without_reply_reason
+- meeting_before_value: a cold-product email asks for time before a verified asset
+- sender_asset_not_verified
+- motion_structure_mismatch
+- draft_generated_despite_no_draft
 **Do NOT put body length limits in hard_fails.** Length is enforced by deterministic code.
-A clear meeting / walkthrough / focused-question ask is ALLOWED in this mode.
+A meeting ask is allowed for a warm intro, an existing relationship, or a live role.
+It is not allowed for a cold product email that has not offered a verified asset.
 
 # SCORE CALIBRATION (same for every style)
 - **90–100**: strong copy.
@@ -1763,6 +1780,12 @@ def claude_critique_email(
         evidence_level=evidence_level_for(lead),
         llm_hard_fails=llm_fails,
     )
+    from trace_reply_reason import assess_reply_reason, reply_reason_hard_fails
+
+    stored = lead.get("reply_reason")
+    if not isinstance(stored, dict) or not stored.get("draft_decision"):
+        stored = assess_reply_reason(lead, profile)
+    align = list(align) + reply_reason_hard_fails(body, stored, profile)
     return annotate_critique(out, integrity_fails=integ, alignment_fails=align)
 
 

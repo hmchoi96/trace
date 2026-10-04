@@ -2,7 +2,7 @@
 
 import { Callout, H3, Stack, Table, Text } from "./ui";
 import type { AdditionalSignal, Person } from "../lib/api";
-import { axisRows, foundOnLabel, sentenceCase, shortDate } from "../lib/format";
+import { axisRows, draftHeld, foundOnLabel, sentenceCase, shortDate } from "../lib/format";
 
 function readSignal(signal: AdditionalSignal) {
   const source = String(signal.source ?? signal.signal_source ?? "");
@@ -83,8 +83,23 @@ export function EvidencePanel({ person }: { person: Person }) {
               : []),
             ["Recommended ask", person.recommendedAsk || "Not reported"],
             ["Recommendation", recommendation || "Not reported"],
+            ...(person.replyReason
+              ? [
+                  ["Outreach motion", sentenceCase(person.replyReason.motion || "")],
+                  ["Reply reason", sentenceCase(person.replyReason.trigger_type || "")],
+                  ["Draft decision", sentenceCase(person.replyReason.draft_decision || "")],
+                ]
+              : []),
           ]}
         />
+        {draftHeld(person) && (
+          <Callout tone="warning" title="Trace will not draft this email">
+            {person.replyReason.reason || "No reply reason yet."}
+            {person.replyReason.missing_evidence?.length
+              ? ` Missing: ${person.replyReason.missing_evidence.join(", ")}.`
+              : ""}
+          </Callout>
+        )}
         {axes.length > 0 && (
           <Table headers={["Axis", "Score"]} rows={axes.map((row) => [row[0], row[1]])} />
         )}

@@ -848,6 +848,42 @@ def test_failed_draft_marks_person_as_draft_failed(conn):
     assert person["draft"]["error"]
 
 
+def test_profile_without_sender_assets_still_loads(conn):
+    from trace_reply_reason import sender_assets
+
+    profile = profiles.get_profile(conn, "akashic")
+    assert "sender_assets" not in profile["profile"]
+    assert sender_assets(profile["profile"]) == []
+
+
+def test_topic_only_draft_skips_the_model_and_cannot_send(conn, monkeypatch):
+    import main as engine
+
+    def boom(*_a, **_k):
+        raise AssertionError("drafting model should not run")
+
+    monkeypatch.setattr(engine, "claude_draft_email", boom)
+    cid = seed_candidate(
+        conn,
+        signal_text="wrote a public post about investment memos",
+        why_relevant="topic overlap only",
+        recommendation_reason="public commentary without workflow ownership",
+        actor_type="PRACTITIONER",
+        outreach_motion="cold_product",
+    )
+    service.decide(conn, cid, "yes")
+    out = service.create_draft(conn, cid)
+    assert out["verdict"] in ("research_more", "no_draft")
+    person = service.candidate_dto(conn, service.get_candidate(conn, cid))
+    assert person["draft"]["body"] in ("", None)
+    assert person["draft"]["sendable"] is False
+    assert person["replyReason"]["trigger_type"] == "topic_trigger"
+    assert person["draftDecision"] != "send_now"
+    with pytest.raises(guards.GuardError) as err:
+        service.send_draft(conn, person["draft"]["id"], sender=ok_sender([]))
+    assert err.value.code == "draft_not_ready"
+
+
 def test_outreach_role_is_exposed_on_person(conn):
     seed_candidate(
         conn,
@@ -864,6 +900,21 @@ def test_outreach_role_is_exposed_on_person(conn):
 # ── Drafting loop ───────────────────────────────────────────────────────────
 
 
+def _open_lead(**extra):
+    lead = {
+        "first_name": "A",
+        "name": "A Person",
+        "outreach_role": "Practitioner",
+        "outreach_motion": "direct_application",
+        "role_open": True,
+        "relevant_proof": "built an outbound system and booked meetings",
+        "owns_or_influences": True,
+        "signal_text": "Northline is hiring a BDR",
+    }
+    lead.update(extra)
+    return lead
+
+
 def test_build_draft_revises_once_then_blocks(monkeypatch):
     import main as engine
 
@@ -875,7 +926,10 @@ def test_build_draft_revises_once_then_blocks(monkeypatch):
         engine, "claude_critique_email",
         lambda *a, **k: {"total": 70, "hard_fails": ["evidence"]},
     )
-    out = drafting.build_draft({"profile_kind": "legacy", "product_name": "X"}, {"first_name": "A"})
+    out = drafting.build_draft(
+        {"profile_kind": "legacy", "product_name": "X"},
+        _open_lead(),
+    )
     assert out["verdict"] == "block"
     assert out["error"] is None
 
@@ -887,7 +941,7 @@ def test_build_draft_reports_a_failure_instead_of_raising(monkeypatch):
         raise RuntimeError("no key")
 
     monkeypatch.setattr(engine, "claude_draft_email", boom)
-    out = drafting.build_draft({"profile_kind": "legacy"}, {"first_name": "A"})
+    out = drafting.build_draft({"profile_kind": "legacy"}, _open_lead())
     assert out["verdict"] == "failed"
     assert "no key" in out["error"]
 
@@ -911,7 +965,7 @@ def test_build_draft_retries_json_parse_once(monkeypatch):
     )
     out = drafting.build_draft(
         {"profile_kind": "legacy", "product_name": "X", "sign_off": "— X"},
-        {"first_name": "Pat"},
+        _open_lead(first_name="Pat"),
     )
     assert calls["n"] == 2
     assert out["error"] is None

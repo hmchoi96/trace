@@ -26,6 +26,7 @@ Shorter is better when meaning survives.
 Never pad to reach a target length.
 
 Keep the body under 75 words.
+The 75-word ceiling protects readability. It is not the reason an email earns a reply.
 Aim for plain, concrete English at roughly an 8th-grade reading level.
 Keep necessary industry language.
 

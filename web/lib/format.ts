@@ -17,6 +17,11 @@ export function axisRows(axes: Record<string, string>): [string, string][] {
     .map(([axis, score]) => [sentenceCase(axis), sentenceCase(score)]);
 }
 
+export function draftHeld(person: Pick<Person, "replyReason">): boolean {
+  const decision = person.replyReason?.draft_decision;
+  return Boolean(decision && decision !== "send_now");
+}
+
 export function actorLabel(person: Person): string {
   const raw = person.actorType?.trim();
   if (raw) return sentenceCase(raw);

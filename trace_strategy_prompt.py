@@ -222,22 +222,18 @@ Evidence-based inferences must be expressed with calibrated language.
 
 Examples:
 
-* "It looks like your team is expanding…"
-* "Given the recent hiring activity…"
-* "I noticed that you are investing in…"
-* "I may be wrong, but this often creates…"
-* "I was curious whether…"
-* "Teams at this stage often run into…"
+* "You posted that the team reopens the memo before IC."
+* "The role is open."
+* "Jason suggested I write to you."
 
 Never present a weak assumption as a confirmed internal problem.
 
 Do not write:
 
 "Your sales team is struggling with low conversion."
+"I may be wrong, but you probably struggle with this."
 
-Write:
-
-"As your outbound team expands, I was curious whether maintaining message quality across reps has become harder."
+Write only what the verified fact supports, plus at most one level of inference.
 
 Never invent statistics, customers, integrations, partnerships, or results.
 
@@ -263,9 +259,16 @@ If the ask is too large, reduce it.
 
 ## STEP 2: IDENTIFY THE TRIGGER
 
-Find the strongest reason this outreach is relevant now from available facts/derived context.
+Separate topic relevance from a reason to reply.
 
-A trigger is useful only if it logically connects to the sender's offer.
+* topic_trigger: the person discussed something relevant, or a company fact, title, or post is adjacent to the workflow. This does not prove pain, ownership, timing, or willingness to reply.
+* action_trigger: the person is doing, buying, hiring, evaluating, requesting, or repeatedly working around the workflow.
+* behavior_trigger: repeated verified workflow behavior or a concrete workaround, plus ownership.
+* relationship_trigger: a named warm introduction or a prior substantive conversation. A LinkedIn connection alone is not one.
+
+For a cold product email, only an action trigger, or a behavior trigger plus a verified sender asset, or a warm path with a specific overlap, can support send_now.
+
+If the research package draft decision is not send_now, do not write an email. Repeat that decision.
 
 Do not use unrelated personalization.
 
@@ -273,33 +276,40 @@ Do not use unrelated personalization.
 
 ## STEP 3: FORM THE PROBLEM HYPOTHESIS
 
-Create a cautious hypothesis about a relevant business problem.
+Name the verified fact first.
 
-The hypothesis must connect:
+At most one inference, one level beyond that fact.
 
-Trigger → likely operational consequence → sender's value
+Do not build a chain of trigger → imagined operational consequence → sender value.
 
-Do not exaggerate the problem.
+Do not use cautious wording to launder a weak hypothesis.
+"I may be wrong, but you probably struggle" is not allowed.
+"Given your product, I imagine the pain" is not allowed.
+
+If only a generic hypothesis exists, the decision is research_more or no_draft.
 
 ---
 
 ## STEP 4: DETERMINE THE RECIPIENT VALUE
 
-Define the most concrete value the recipient might receive.
+Distinguish a generic benefit from a deliverable the recipient can receive before a meeting.
 
-Prefer outcomes over features.
+Generic benefits are not enough for a cold product send_now:
 
-### For executives
+* better memory
+* faster decisions
+* less manual work
+* save time
 
-Focus on revenue, strategic risk, speed, forecastability, team productivity, cost, scalability.
+Deliverable value is a named thing that already exists in the verified sender asset:
 
-### For managers
+* a one-page replay of one public deal
+* a completed account-specific teardown
+* a working sample that uses public information
+* a relevant proof artifact for an open role
 
-Focus on rep performance, workflow consistency, reporting, coaching, visibility, operational control.
-
-### For individual contributors
-
-Focus on less manual work, better preparation, faster execution, higher performance, fewer repetitive tasks.
+Never claim that asset exists unless the research package lists it under Verified sender asset.
+A planned asset means strengthen_offer, not an email.
 
 ---
 
@@ -399,6 +409,7 @@ Count body words excluding the greeting and sign-off.
 * 30–40 words is fine when complete.
 * Never exceed 75 words.
 * 75 words is a ceiling, not a target.
+* The word ceiling protects readability. It is not the reason an email earns a reply.
 
 Do not remove the one detail necessary to understand the value exchange.
 Remove everything else.
@@ -635,8 +646,19 @@ Use the following schema:
     "differentiation": 0,
     "total_score": 0
   },
+  "reply_reason": {
+    "motion": "",
+    "trigger_type": "",
+    "reply_reason_level": "",
+    "active_occasion": "",
+    "workflow_ownership_evidence": [],
+    "verified_sender_asset": "",
+    "recipient_gets_before_meeting": "",
+    "next_action": "",
+    "missing_evidence": []
+  },
   "send_decision": {
-    "status": "send_now | research_more | strengthen_offer | change_recipient | use_different_channel",
+    "status": "send_now | research_more | strengthen_offer | change_recipient | use_different_channel | no_draft",
     "reason": ""
   }
 }
@@ -650,9 +672,12 @@ Use the following schema:
 * Do not include commentary outside the JSON.
 * Do not fabricate missing information.
 * Do not use placeholders in the final email.
-* If critical information is missing, produce the strongest safe draft possible and clearly record the missing information under unknowns.
+* If the deterministic draft decision is not send_now, return that status and do not write email.body as a sendable email.
+* The code gate is authoritative. Do not override no_draft, research_more, strengthen_offer, change_recipient, or use_different_channel.
+* If critical information is missing, record it under missing_evidence. Do not invent a reply reason.
 * If the offer is too weak, do not hide the weakness behind polished writing.
-* If the recipient value is unclear, set the send decision to strengthen_offer.
+* If the recipient value is a generic benefit rather than a verified asset, set the send decision to strengthen_offer.
+* Never mention a teardown, replay, prototype, or analysis the profile has not verified.
 * If another persona is more likely to own the problem, set the send decision to change_recipient.
 * If a warm introduction, direct message, comment, or product artifact would be more effective than email, set the send decision to use_different_channel.
 * The final email must remain truthful, relevant, specific, and easy to reply to.
@@ -726,6 +751,8 @@ def normalize_trace_strategy_draft(raw: dict) -> dict:
         "short_version": raw.get("short_version"),
         "quality_score": raw.get("quality_score"),
         "send_decision": raw.get("send_decision"),
+        "draft_decision": raw.get("draft_decision") or raw.get("send_decision"),
+        "reply_reason": raw.get("reply_reason"),
         "email_mode": "trace_strategy_email",
     }
     return out
@@ -743,6 +770,8 @@ def draft_strategy_jsonl_fields(email: dict) -> dict:
         "short_version",
         "quality_score",
         "send_decision",
+        "draft_decision",
+        "reply_reason",
         "cta",
         "email_mode",
     ):
