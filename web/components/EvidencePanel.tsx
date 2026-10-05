@@ -2,7 +2,27 @@
 
 import { Callout, H3, Stack, Table, Text } from "./ui";
 import type { AdditionalSignal, Person } from "../lib/api";
-import { axisRows, draftHeld, foundOnLabel, sentenceCase, shortDate } from "../lib/format";
+import { axisRows, draftHeld, foundOnLabel, reasonLines, sentenceCase, shortDate } from "../lib/format";
+
+function ReasonText({
+  reason,
+  label,
+  empty,
+}: {
+  reason: string;
+  label: string;
+  empty: string;
+}) {
+  const lines = reasonLines(reason, label);
+  if (lines.length === 0) return empty;
+  return (
+    <div className="reason">
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+    </div>
+  );
+}
 
 function readSignal(signal: AdditionalSignal) {
   const source = String(signal.source ?? signal.signal_source ?? "");
@@ -66,7 +86,11 @@ export function EvidencePanel({ person }: { person: Person }) {
         <H3>Trace recommendation</H3>
         {recommendation ? (
           <Callout tone="info" title={`${recommendation} · you still decide`}>
-            {person.recommendationReason || "No reason was recorded for this read."}
+            <ReasonText
+              reason={person.recommendationReason}
+              label={recommendation}
+              empty="No reason was recorded for this read."
+            />
           </Callout>
         ) : (
           <Callout tone="neutral" title="No recommendation recorded · you still decide">

@@ -23,6 +23,7 @@ import {
   type Tone,
 } from "../components/ui";
 import type { Health, HuntSummary, Person, Profile, Template } from "../lib/api";
+import { buildProspectHtml, openProspectExport, prospectSortCaption } from "../lib/exportProspects";
 import {
   actorLabel,
   draftHeld,
@@ -746,6 +747,7 @@ export function Records({
   const [sortKey, setSortKey] = useState<SortKey>("added");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [listSize, setListSize] = useState(LIST_MIN);
+  const [exportBlocked, setExportBlocked] = useState(false);
 
   useEffect(() => {
     setFilter("all");
@@ -938,7 +940,29 @@ export function Records({
                   : `Find missing contacts (${missingContact.length})`}
               </Button>
             )}
+            <Button
+              variant="secondary"
+              title="Open a printable page of this list. Save it as PDF from that page."
+              onClick={() => {
+                const html = buildProspectHtml({
+                  profile,
+                  people: rows,
+                  campaignCount: people.length,
+                  listTitle: filterTitle(filter),
+                  foundOn: foundFilter === "all" ? "All" : foundFilter,
+                  sortCaption: prospectSortCaption(sortKey, sortDir),
+                });
+                setExportBlocked(!openProspectExport(html));
+              }}
+            >
+              Export list
+            </Button>
           </Row>
+          {exportBlocked && (
+            <Callout tone="warning" title="The export window was blocked">
+              Allow pop-ups for this site, then click Export list again.
+            </Callout>
+          )}
           {!lookupReady && missingContact.length > 0 && (
             <Text size="small" tone="tertiary">
               Add APOLLO_API_KEY and/or HUNTER_API_KEY to .env to look up contacts in bulk.
@@ -1056,7 +1080,8 @@ export function Records({
           <Text size="small" tone="tertiary">
             Default order is date added, newest first. Click a column to sort. Latest signal is
             when the public post or page was found, not when they were emailed. Review opens
-            the person below with their draft. Send this sends the draft Trace wrote.
+            the person below with their draft. Send this sends the draft Trace wrote. Export
+            list opens this cut as a page you can save as PDF.
           </Text>
 
           {selected && (

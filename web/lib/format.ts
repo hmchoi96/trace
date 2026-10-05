@@ -11,6 +11,19 @@ export function sentenceCase(value: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** One paragraph of research prose, as separate sentences. Drops a lead that repeats the label. */
+export function reasonLines(reason: string, label = ""): string[] {
+  const text = reason.replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const parts = text
+    .split(/(?<=\.)['"]?\s+(?=[A-Z])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const lead = label.replace(/\.+$/, "").trim().toLowerCase();
+  if (lead && parts[0]?.replace(/\.+$/, "").trim().toLowerCase() === lead) parts.shift();
+  return parts;
+}
+
 export function axisRows(axes: Record<string, string>): [string, string][] {
   return Object.entries(axes)
     .filter(([, score]) => typeof score === "string" && score.length > 0)

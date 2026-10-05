@@ -303,9 +303,18 @@ select {
 
 .callout-body {
   font-size: 13px;
+  line-height: 1.45;
   color: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.reason p {
+  margin: 0 0 8px;
+}
+
+.reason p:last-child {
+  margin-bottom: 0;
 }
 
 .callout-info {
