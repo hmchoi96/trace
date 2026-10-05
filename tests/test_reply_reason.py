@@ -573,10 +573,14 @@ def test_unknown_gap_does_not_send_on_behavior_alone():
     assert out["draft_decision"] == "research_more"
     action = _credential_rec(
         trigger_type="action_trigger",
+        research_schema_version=1,
         research={"gap_assessment": {"status": "unknown", "reason": "", "based_on": []}},
     )
     sent = assess_reply_reason(action, _credential_profile())
-    assert sent["draft_decision"] == "send_now"
+    assert sent["draft_decision"] == "research_more"
+    from signal_discovery import _slot_kind
+
+    assert _slot_kind(action, _credential_profile()) != "ready"
 
 
 def test_possible_gap_stays_an_inference_and_can_ask():
@@ -625,6 +629,12 @@ def test_possible_gap_stays_an_inference_and_can_ask():
     )
     assert "inferred_gap_claimed_as_fact" not in reply_reason_hard_fails(
         "How do you plan to manage authority across systems?", out
+    )
+    assert "inferred_gap_claimed_as_fact" in reply_reason_hard_fails(
+        "Managing permissions across these agents is becoming difficult.", out
+    )
+    assert "inferred_gap_claimed_as_fact" not in reply_reason_hard_fails(
+        "Curious how you're handling authority as Inspect expands across systems.", out
     )
 
 

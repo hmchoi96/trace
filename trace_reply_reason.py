@@ -688,14 +688,6 @@ def _decide(
     return "no_draft", "No reply reason.", ["reply_reason"]
 
 
-_GAP_CLAIM = (
-    "security hole",
-    "security vulnerability",
-    "unresolved vulnerability",
-    "unresolved security",
-)
-
-
 def assess_reply_reason(
     rec: dict[str, Any] | None,
     profile: dict[str, Any] | None = None,
@@ -804,6 +796,12 @@ def format_reply_reason_section(assessment: dict[str, Any]) -> str:
         f"- Draft decision: {assessment.get('draft_decision') or ''}",
         "- Missing evidence: " + (", ".join(missing) if missing else ""),
         f"- Reason: {assessment.get('reason') or ''}",
+        (
+            "If Gap assessment is not confirmed_gap, do not state an unconfirmed problem as fact. "
+            "A narrow question about the unknown is allowed."
+            if assessment.get("gap_status") in ("possible_gap", "unknown", "covered")
+            else ""
+        ),
         "",
         MOTION_STRUCTURES.get(motion, MOTION_STRUCTURES["cold_product"]),
         "",
@@ -910,7 +908,9 @@ def reply_reason_hard_fails(
         fails.append("meeting_before_value")
     if _body_has(text, _ASSET_CLAIM) and not verified:
         fails.append("sender_asset_not_verified")
-    if assessment.get("gap_status") == "possible_gap" and _body_has(text, _GAP_CLAIM):
+    from trace_research import states_unconfirmed_problem
+
+    if assessment.get("gap_status") in ("possible_gap", "unknown", "covered") and states_unconfirmed_problem(text):
         fails.append("inferred_gap_claimed_as_fact")
     if motion == "expert_research" and _body_has(text, _PERSONAL_PAIN):
         fails.append("motion_structure_mismatch")

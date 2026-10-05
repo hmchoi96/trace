@@ -2217,9 +2217,10 @@ def _candidate_from_qual(
     )
     extra["identity_resolved"] = qual.get("identity_resolved")
     extra["deepened"] = bool(qual.get("deepened"))
-    from trace_research import research_from_record
+    from trace_research import RESEARCH_SCHEMA_VERSION, finalize_new_research
 
-    extra["research"] = research_from_record({"research": qual.get("research") or {}})
+    extra["research"] = finalize_new_research(qual.get("research"))
+    extra["research_schema_version"] = RESEARCH_SCHEMA_VERSION
     return build_candidate(
         signal=signal,
         person=qual.get("person"),
@@ -2585,6 +2586,10 @@ def run_discovery(
         extra["identity_resolved"] = qual.get("identity_resolved")
         extra["cache_hit"] = bool(qual.get("cache_hit"))
         extra["deepened"] = bool(qual.get("deepened"))
+        from trace_research import RESEARCH_SCHEMA_VERSION, finalize_new_research
+
+        extra["research"] = finalize_new_research(qual.get("research"))
+        extra["research_schema_version"] = RESEARCH_SCHEMA_VERSION
         extra["signals"] = group["signals"]
         if len(group["signals"]) > 1:
             extra["additional_signals"] = group["signals"][1:]

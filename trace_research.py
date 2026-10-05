@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 GAP_STATUSES = ("confirmed_gap", "possible_gap", "covered", "unknown")
+RESEARCH_SCHEMA_VERSION = 1
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 _CONF_RANK = {"low": 1, "medium": 2, "high": 3}
 
@@ -22,7 +23,9 @@ _DECISION_LABELS = {
     "no_draft": "No draft",
 }
 
-_POSSIBLE_GAP_CLAIM = "Do not claim the remaining gap as a verified fact."
+_POSSIBLE_GAP_CLAIM = (
+    "Do not state an unconfirmed problem as fact. Ask about the unknown instead."
+)
 _COVERED_CLAIM = "Do not claim a remaining problem from this evidence."
 
 
@@ -228,8 +231,34 @@ def research_from_record(rec: dict[str, Any] | None) -> dict[str, Any]:
     return dedupe_research(raw)
 
 
+def is_versioned(rec: dict[str, Any] | None) -> bool:
+    """New research carries a schema version. Stored records from before that do not."""
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("research_schema_version"):
+        return True
+    research = rec.get("research")
+    return isinstance(research, dict) and bool(research.get("schema_version"))
+
+
+def finalize_new_research(raw: Any) -> dict[str, Any]:
+    """Every new candidate gets a gap status. A missing or invalid one is unknown."""
+    research = dedupe_research(parse_research(raw if isinstance(raw, dict) else {}))
+    if research["gap_assessment"]["status"] not in GAP_STATUSES:
+        research["gap_assessment"] = {
+            "status": "unknown",
+            "reason": "Gap assessment was missing or invalid.",
+            "based_on": [],
+        }
+    research["schema_version"] = RESEARCH_SCHEMA_VERSION
+    return research
+
+
 def gap_status(rec: dict[str, Any] | None) -> str:
-    return str(research_from_record(rec)["gap_assessment"]["status"] or "")
+    status = str(research_from_record(rec)["gap_assessment"]["status"] or "")
+    if is_versioned(rec):
+        return status if status in GAP_STATUSES else "unknown"
+    return status
 
 
 def do_not_claim_lines(rec: dict[str, Any] | None) -> list[str]:
@@ -256,10 +285,11 @@ def apply_gap_to_decision(
     """Cold-product precedence. An empty status leaves the decision unchanged.
 
     covered: never send_now.
-    unknown: send_now only for an independent action trigger.
-    possible_gap: send_now may stand, and the reason must not state the gap as fact.
+    unknown: never send_now. A missing assessment on a new candidate is unknown.
+    possible_gap: send_now may stand, and the draft must not state the gap as fact.
     confirmed_gap: keep the decision the rest of the gate already made.
     """
+    del trigger
     if status not in GAP_STATUSES:
         return decision, reason, missing
     if status == "covered":
@@ -268,7 +298,7 @@ def apply_gap_to_decision(
             "Available evidence shows the existing workaround covers the problem. No demonstrated remaining gap.",
             ["remaining_gap"],
         )
-    if status == "unknown" and decision == "send_now" and trigger != "action_trigger":
+    if status == "unknown" and decision == "send_now":
         return (
             "research_more",
             "Public evidence does not show whether a problem remains.",
@@ -305,6 +335,7 @@ def decision_summary(rec: dict[str, Any] | None, assessment: dict[str, Any] | No
 
 
 def research_dto(rec: dict[str, Any] | None) -> dict[str, Any]:
+    rec = rec or {}
     research = research_from_record(rec)
     gap = research["gap_assessment"]
 
@@ -336,4 +367,38 @@ def research_dto(rec: dict[str, Any] | None) -> dict[str, Any]:
             "basedOn": list(gap["based_on"]),
         },
         "doNotClaim": do_not_claim_lines(rec),
+        "schemaVersion": rec.get("research_schema_version") or research.get("schema_version") or 0,
     }
+
+
+_ASK = re.compile(
+    r"^(curious|wondering|interested|wanted to ask|quick question|how|what|why|when|where|who|do you|does|are you|is there)\b"
+    r"|curious how|wondering how|wanted to ask",
+    re.I,
+)
+_PROBLEM_ASSERTION = re.compile(
+    r"\b("
+    r"becoming difficult|becoming hard|is difficult|are difficult|is hard|are hard|"
+    r"difficult to|hard to|struggl\w*|pain|gaps?|holes?|vulnerabilit\w*|"
+    r"unresolved|fragment\w*|sprawl\w*|broken|failing|lack of|"
+    r"without a|no way to|cannot|can't|problem|weakness|leaks?"
+    r")\b",
+    re.I,
+)
+
+
+def states_unconfirmed_problem(body: str) -> bool:
+    """A declarative sentence that treats an unconfirmed problem as fact.
+
+    A question, or a sentence framed as curiosity, is not an assertion.
+    """
+    text = (body or "").strip()
+    if not text:
+        return False
+    for part in re.split(r"(?<=[.!?])\s+", text):
+        sentence = part.strip()
+        if not sentence or sentence.endswith("?") or _ASK.search(sentence):
+            continue
+        if _PROBLEM_ASSERTION.search(sentence):
+            return True
+    return False

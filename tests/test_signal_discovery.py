@@ -1040,6 +1040,13 @@ def test_fill_slots_replaces_a_vendor_until_someone_is_actionable():
                 "actor_type": "PRACTITIONER",
                 "recommendation": "LIKELY_PROSPECT",
                 "recommendation_reason": "Compares past IC memos on every deal.",
+                "research": {
+                    "gap_assessment": {
+                        "status": "confirmed_gap",
+                        "reason": "The team still compares past memos on every deal.",
+                        "based_on": ["https://example.com/priya"],
+                    }
+                },
             })
         if "https://example.com/vendor" in prompt:
             return _json_result({"signals": [{
@@ -1134,6 +1141,13 @@ def test_fill_slots_finds_an_owner_for_a_company_signal():
                 }],
                 "recommendation": "LIKELY_PROSPECT",
                 "recommendation_reason": "She runs the comparison now.",
+                "research": {
+                    "gap_assessment": {
+                        "status": "confirmed_gap",
+                        "reason": "She still compares past memos on every deal.",
+                        "based_on": ["https://example.com/mina"],
+                    }
+                },
             })
         if "identity researcher" in prompt:
             return _json_result({
@@ -1299,6 +1313,47 @@ def test_covered_resolution_does_not_fill_a_slot_and_the_hunt_continues():
     assert stats["reviewed"] >= 2
     assert stats["ready"] == 1
     assert calls["resolution"] == 1
+
+
+def test_omitted_gap_does_not_fill_a_slot():
+    def researcher(prompt, tools=None, **kwargs):
+        if "Search ONLY X" in prompt or "Already reviewed" in prompt:
+            return _json_result({"signals": []})
+        if "identity researcher" in prompt or "resolution researcher" in prompt:
+            return _json_result({
+                "person": {
+                    "name": "Amina Cole",
+                    "title": "Engineer",
+                    "company": "Northline",
+                    "linkedin_url": "https://linkedin.com/in/amina",
+                },
+                "identity_resolved": True,
+                "actor_type": "PRACTITIONER",
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "Already solved internally and no remaining problem was shown.",
+            })
+        return _json_result({"signals": [{
+            "source": "web",
+            "source_url": "https://example.com/amina",
+            "author_name": "Amina Cole",
+            "published_at": "2026-06-01",
+            "signal_text": "Amina owns the workflow for production agent credentials.",
+            "relevance": "highly_relevant",
+        }]})
+
+    stats = {}
+    rows = run_discovery(
+        _credential_profile(),
+        list_name="credential_bridge",
+        profile_key="credential_bridge",
+        limit=1,
+        researcher=researcher,
+        fill_slots=True,
+        slot_stats=stats,
+    )
+    assert rows == []
+    assert stats["ready"] == 0
+    assert stats["reviewed"] >= 1
 
 
 
