@@ -213,6 +213,62 @@ def test_records_can_draft_pending_person_with_email(conn):
     assert row["decision"] == "yes"
 
 
+def test_contact_lookup_failure_is_not_sendable(conn):
+    cid = seed_candidate(
+        conn,
+        research={
+            "verified_facts": [
+                {
+                    "claim": "The workflow is in production.",
+                    "source_url": "https://example.com/dana",
+                    "source_date": "2026-01-01",
+                    "quote_or_paraphrase": "In production.",
+                }
+            ],
+            "inferences": [
+                {"claim": "A remaining gap is inferred.", "confidence": "low", "based_on": ["https://example.com/dana"]}
+            ],
+            "unknowns": ["Whether a central control already exists."],
+            "gap_assessment": {"status": "possible_gap", "reason": "Inferred.", "based_on": []},
+        },
+    )
+    service.decide(conn, cid, "yes")
+
+    def matcher(details, **_kwargs):
+        return {"matches": [None]}
+
+    out = service.prepare_candidate(conn, cid, matcher=matcher, drafter=stub_draft())
+    assert out["reason"] == "no_contact"
+    person = service.candidate_dto(conn, service.get_candidate(conn, cid))
+    assert person["status"] == "contact_not_found"
+    assert person["contactStatus"] == "contact_not_found"
+    assert person["draft"] is None
+    assert person["research"]["verifiedFacts"][0]["claim"] == "The workflow is in production."
+    assert person["research"]["inferences"][0]["claim"] == "A remaining gap is inferred."
+    assert person["email"] in ("", None)
+
+
+def test_old_candidate_json_loads_without_structured_research(conn):
+    cid = seed_candidate(conn, recommendation_reason="A long repeated paragraph that is not a fact.")
+    person = service.candidate_dto(conn, service.get_candidate(conn, cid))
+    assert person["research"]["verifiedFacts"] == []
+    assert person["research"]["inferences"] == []
+    assert person["recommendationReason"] == "A long repeated paragraph that is not a fact."
+    assert all("paragraph" not in fact["claim"] for fact in person["research"]["verifiedFacts"])
+    stored = service.get_candidate(conn, cid)
+    assert stored["decision"] == "pending"
+
+
+def test_replacement_hunt_uses_the_same_bar(conn):
+    out = service.create_hunt(conn, "oneaway", 1, replacement=True)
+    assert out["huntId"]
+    row = conn.execute("SELECT limit_n FROM hunts WHERE id = ?", (out["huntId"],)).fetchone()
+    assert row["limit_n"] == 1
+    with pytest.raises(guards.GuardError) as err:
+        service.create_hunt(conn, "oneaway", 1)
+    assert err.value.code == "bad_limit"
+
+
 def test_apollo_runs_only_after_yes_and_never_invents_an_address(conn):
     cid = seed_candidate(conn)
     calls = []

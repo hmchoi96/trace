@@ -1,8 +1,9 @@
 "use client";
 
 import { Callout, H3, Stack, Table, Text } from "./ui";
-import type { AdditionalSignal, Person } from "../lib/api";
+import type { AdditionalSignal, Person, ResearchFact, ResearchInference } from "../lib/api";
 import { axisRows, draftHeld, foundOnLabel, reasonLines, sentenceCase, shortDate } from "../lib/format";
+import { hasStructuredResearch, sourceUrls } from "../lib/researchView";
 
 function ReasonText({
   reason,
@@ -32,11 +33,91 @@ function readSignal(signal: AdditionalSignal) {
   return { source: source || "Web", at: shortDate(at), text, url };
 }
 
+function factLine(fact: ResearchFact): string {
+  const bits = [fact.claim];
+  if (fact.sourceDate) bits.push(fact.sourceDate);
+  if (fact.sourceUrl) bits.push(fact.sourceUrl);
+  return bits.join(" · ");
+}
+
+function inferenceLine(item: ResearchInference): string {
+  const rank = item.confidence ? sentenceCase(item.confidence) : "";
+  return rank ? `${item.claim} [${rank}]` : item.claim;
+}
+
+function BulletList({ items, empty }: { items: string[]; empty: string }) {
+  if (items.length === 0) return <Text tone="tertiary">{empty}</Text>;
+  return (
+    <div className="reason">
+      {items.map((item) => (
+        <p key={item}>{item}</p>
+      ))}
+    </div>
+  );
+}
+
+function DecisionSummary({ person }: { person: Person }) {
+  const summary = person.decisionSummary;
+  if (!summary) return null;
+  return (
+    <Table
+      headers={["Decision", "Trace's read"]}
+      rows={[
+        ["Decision", summary.decision || "Not reported"],
+        ["Why now", summary.whyNow || "Not reported"],
+        ["Why this person", summary.whyThisPerson || "Not reported"],
+        ["Reply reason", summary.replyReason || "Not reported"],
+        ["Do not claim", summary.doNotClaim || "Not reported"],
+      ]}
+    />
+  );
+}
+
+function ResearchSections({ person }: { person: Person }) {
+  const research = person.research;
+  if (!research) return null;
+  const sources = sourceUrls(person);
+  return (
+    <Stack gap={10}>
+      <Stack gap={4}>
+        <H3>Verified facts</H3>
+        <BulletList
+          items={research.verifiedFacts.map(factLine)}
+          empty="None recorded"
+        />
+      </Stack>
+      <Stack gap={4}>
+        <H3>Current workarounds</H3>
+        <BulletList
+          items={research.currentWorkarounds.map(factLine)}
+          empty="None recorded"
+        />
+      </Stack>
+      <Stack gap={4}>
+        <H3>Trace inferences</H3>
+        <BulletList
+          items={research.inferences.map(inferenceLine)}
+          empty="None recorded"
+        />
+      </Stack>
+      <Stack gap={4}>
+        <H3>Unknowns</H3>
+        <BulletList items={research.unknowns} empty="None recorded" />
+      </Stack>
+      <Stack gap={4}>
+        <H3>Sources</H3>
+        <BulletList items={sources} empty="None recorded" />
+      </Stack>
+    </Stack>
+  );
+}
+
 export function EvidencePanel({ person }: { person: Person }) {
   const extras = (person.additionalSignals ?? []).map(readSignal).filter((s) => s.text);
   const axes = axisRows(person.axes ?? {});
   const recommendation = person.recommendation ? sentenceCase(person.recommendation) : "";
   const actor = person.actorType ? sentenceCase(person.actorType) : "";
+  const structured = hasStructuredResearch(person);
 
   return (
     <Stack gap={14}>
@@ -82,9 +163,23 @@ export function EvidencePanel({ person }: { person: Person }) {
         </Stack>
       )}
 
+      {person.status === "contact_not_found" && (
+        <Callout tone="warning" title="Contact not found">
+          Lookup did not return an email. This person is not sendable. The research stays
+          in the file.
+        </Callout>
+      )}
+
       <Stack gap={6}>
-        <H3>Trace recommendation</H3>
-        {recommendation ? (
+        {(person.decisionSummary || structured) && (
+          <>
+            <H3>Decision</H3>
+            <DecisionSummary person={person} />
+          </>
+        )}
+        {structured ? (
+          <ResearchSections person={person} />
+        ) : recommendation ? (
           <Callout tone="info" title={`${recommendation} · you still decide`}>
             <ReasonText
               reason={person.recommendationReason}

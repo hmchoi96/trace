@@ -23,7 +23,14 @@ import {
   type Tone,
 } from "../components/ui";
 import type { Health, HuntSummary, Person, Profile, Template } from "../lib/api";
-import { buildProspectHtml, openProspectExport, prospectSortCaption } from "../lib/exportProspects";
+import {
+  addedDayGroups,
+  addedDayKey,
+  addedOnCaption,
+  buildProspectHtml,
+  openProspectExport,
+  prospectSortCaption,
+} from "../lib/exportProspects";
 import {
   actorLabel,
   draftHeld,
@@ -503,6 +510,13 @@ function RecordDetail({
                         : ""}
                     </Callout>
                   )}
+                  {person.status === "contact_not_found" && (
+                    <Callout tone="warning" title="Contact not found">
+                      Lookup did not return an email, so this person is not sendable. The
+                      research stays in the file. Hunt for a replacement without lowering
+                      the outreach bar.
+                    </Callout>
+                  )}
                   {!person.draft?.body && person.status === "approved" && !draftHeld(person) && (
                     <Callout tone="info" title="Trace is writing the draft">
                       Claude is drafting from your profile template and this person&apos;s
@@ -555,9 +569,11 @@ function RecordDetail({
                       {person.draft?.body ||
                         (person.status === "draft_failed"
                           ? "No draft body was saved."
-                          : person.status === "approved"
-                            ? "Draft in progress…"
-                            : "Pick a template and click Write draft, or wait for Trace to finish.")}
+                          : person.status === "contact_not_found"
+                            ? "No email, so Trace did not write a sendable draft."
+                            : person.status === "approved"
+                              ? "Draft in progress…"
+                              : "Pick a template and click Write draft, or wait for Trace to finish.")}
                     </Text>
                   </div>
                   {person.draft && !person.draft.sendable && person.draft.body && (
@@ -708,6 +724,7 @@ export function Records({
   onSentMyself,
   onPullContact,
   onPullContactsBulk,
+  onHuntReplacements,
   onSaveContact,
   onRewriteDraft,
   onRefresh,
@@ -734,6 +751,7 @@ export function Records({
   onSentMyself: (person: Person) => void;
   onPullContact: (person: Person) => void;
   onPullContactsBulk: (people: Person[]) => void | Promise<void>;
+  onHuntReplacements: (count: number) => void;
   onSaveContact: (personId: string, contact: { email: string; phone: string }) => Promise<void>;
   onRewriteDraft: (personId: string, templateId: string, followup?: boolean) => Promise<void>;
   onRefresh: () => void;
@@ -748,10 +766,12 @@ export function Records({
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [listSize, setListSize] = useState(LIST_MIN);
   const [exportBlocked, setExportBlocked] = useState(false);
+  const [exportDay, setExportDay] = useState("all");
 
   useEffect(() => {
     setFilter("all");
     setFoundFilter("all");
+    setExportDay("all");
   }, [profile.id]);
 
   useEffect(() => {
@@ -769,6 +789,14 @@ export function Records({
     .filter((p) => foundFilter === "all" || foundOnLabel(p) === foundFilter)
     .slice()
     .sort((a, b) => compareRows(a, b, sortKey, sortDir));
+
+  const exportDays = addedDayGroups(rows);
+  const exportDayActive = exportDays.some((day) => day.key === exportDay) ? exportDay : "all";
+  const exportPeople =
+    exportDayActive === "all"
+      ? rows
+      : rows.filter((person) => addedDayKey(person) === exportDayActive);
+  const exportAddedOn = exportDayActive === "all" ? "" : addedOnCaption(exportDayActive);
 
   const selected = rows.find((p) => p.id === selectedId) ?? rows[0];
   const sentCount = people.filter((p) => Boolean(p.sentAt)).length;
@@ -804,6 +832,8 @@ export function Records({
   const visibleRows = clampListSize(listSize, rows.length);
   const withSend = filter !== "sent" && filter !== "replied";
   const missingContact = rows.filter((p) => !String(p.email || "").trim());
+  const contactNotFound = people.filter((person) => person.status === "contact_not_found");
+  const latestHunt = recentHunts.find((item) => item.status === "done");
   const lookupReady = Boolean(health?.apollo || health?.hunter);
   const pullingBulk = bulkPullProgress !== null;
   const showBulkPull = missingContact.length > 0 || pullingBulk;
@@ -929,6 +959,15 @@ export function Records({
               {filterTitle(filter)} · {rows.length}
             </H3>
             <Spacer />
+            {contactNotFound.length > 0 && (
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => onHuntReplacements(contactNotFound.length)}
+              >
+                {`Hunt for ${contactNotFound.length} more who meet the outreach bar`}
+              </Button>
+            )}
             {showBulkPull && (
               <Button
                 variant="secondary"
@@ -940,17 +979,49 @@ export function Records({
                   : `Find missing contacts (${missingContact.length})`}
               </Button>
             )}
+            {exportDays.length > 1 && (
+              <>
+                <Text size="small" tone="secondary">
+                  Added
+                </Text>
+                <Pill
+                  size="sm"
+                  active={exportDayActive === "all"}
+                  onClick={() => setExportDay("all")}
+                >
+                  All
+                </Pill>
+                {exportDays.map((day) => (
+                  <Pill
+                    key={day.key}
+                    size="sm"
+                    active={exportDayActive === day.key}
+                    onClick={() => setExportDay(day.key)}
+                  >
+                    {day.label}
+                  </Pill>
+                ))}
+              </>
+            )}
             <Button
               variant="secondary"
-              title="Open a printable page of this list. Save it as PDF from that page."
+              title="Open a printable page of this list. The day is when they were added here, not when the signal was posted."
               onClick={() => {
                 const html = buildProspectHtml({
                   profile,
-                  people: rows,
+                  people: exportPeople,
                   campaignCount: people.length,
                   listTitle: filterTitle(filter),
                   foundOn: foundFilter === "all" ? "All" : foundFilter,
+                  addedOn: exportAddedOn,
                   sortCaption: prospectSortCaption(sortKey, sortDir),
+                  hunt: latestHunt
+                    ? {
+                        target: latestHunt.limit,
+                        reviewed: latestHunt.reviewed,
+                        outreachReady: latestHunt.candidateCount,
+                      }
+                    : null,
                 });
                 setExportBlocked(!openProspectExport(html));
               }}
@@ -1081,7 +1152,9 @@ export function Records({
             Default order is date added, newest first. Click a column to sort. Latest signal is
             when the public post or page was found, not when they were emailed. Review opens
             the person below with their draft. Send this sends the draft Trace wrote. Export
-            list opens this cut as a page you can save as PDF.
+            list opens this cut as a page you can save as PDF. Each person starts on a
+            new page. When a file has more than one day, pick the day they were added.
+            That is the hunt, not the signal date.
           </Text>
 
           {selected && (

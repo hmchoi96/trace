@@ -55,6 +55,7 @@ def _guarded(fn, *args, **kwargs):
 class HuntRequest(BaseModel):
     profileId: str
     limit: int = 5
+    replacement: bool = False
 
 
 class DecisionRequest(BaseModel):
@@ -165,7 +166,9 @@ def cost(profile_id: str, limit: int = 5) -> dict[str, Any]:
 
 @app.post("/api/hunts")
 def create_hunt(payload: HuntRequest) -> dict[str, Any]:
-    return _guarded(service.create_hunt, conn(), payload.profileId, payload.limit)
+    return _guarded(
+        service.create_hunt, conn(), payload.profileId, payload.limit, payload.replacement
+    )
 
 
 @app.post("/api/hunts/{hunt_id}/cancel")

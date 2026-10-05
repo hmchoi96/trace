@@ -688,6 +688,14 @@ def _decide(
     return "no_draft", "No reply reason.", ["reply_reason"]
 
 
+_GAP_CLAIM = (
+    "security hole",
+    "security vulnerability",
+    "unresolved vulnerability",
+    "unresolved security",
+)
+
+
 def assess_reply_reason(
     rec: dict[str, Any] | None,
     profile: dict[str, Any] | None = None,
@@ -703,6 +711,11 @@ def assess_reply_reason(
     decision, reason, missing = _decide(
         rec, motion=motion, trigger=trigger, alignment=alignment, asset=asset, blob=blob
     )
+    from trace_research import apply_gap_to_decision, do_not_claim_lines, gap_status
+
+    gap = gap_status(rec)
+    if motion == "cold_product":
+        decision, reason, missing = apply_gap_to_decision(gap, trigger, decision, reason, missing)
     asset_name = ""
     asset_status = ""
     gets = ""
@@ -716,7 +729,9 @@ def assess_reply_reason(
         occasion = _text(rec.get("signal_text"))[:180]
     path = _text(rec.get("relationship_path") or rec.get("introducer"))
     nxt = _text(rec.get("next_action"))
-    if decision == "send_now" and not nxt:
+    if decision == "send_now" and motion == "cold_product" and gap == "possible_gap":
+        nxt = "Ask about the inferred gap. Do not state it as fact."
+    elif decision == "send_now" and not nxt:
         nxt = {
             "direct_application": "conversation about the open role",
             "warm_intro": "narrow conversation implied by the introduction",
@@ -740,6 +755,8 @@ def assess_reply_reason(
         "missing_evidence": missing,
         "draft_decision": decision,
         "reason": reason,
+        "gap_status": gap,
+        "do_not_claim": do_not_claim_lines(rec),
     }
 
 
@@ -782,6 +799,8 @@ def format_reply_reason_section(assessment: dict[str, Any]) -> str:
         f"- Verified sender asset: {assessment.get('sender_asset') or ''}",
         f"- Recipient gets before meeting: {assessment.get('recipient_gets_before_meeting') or ''}",
         f"- Next action: {assessment.get('next_action') or ''}",
+        f"- Gap assessment: {assessment.get('gap_status') or ''}",
+        "- Do not claim: " + ("; ".join(assessment.get("do_not_claim") or [])),
         f"- Draft decision: {assessment.get('draft_decision') or ''}",
         "- Missing evidence: " + (", ".join(missing) if missing else ""),
         f"- Reason: {assessment.get('reason') or ''}",
@@ -891,6 +910,8 @@ def reply_reason_hard_fails(
         fails.append("meeting_before_value")
     if _body_has(text, _ASSET_CLAIM) and not verified:
         fails.append("sender_asset_not_verified")
+    if assessment.get("gap_status") == "possible_gap" and _body_has(text, _GAP_CLAIM):
+        fails.append("inferred_gap_claimed_as_fact")
     if motion == "expert_research" and _body_has(text, _PERSONAL_PAIN):
         fails.append("motion_structure_mismatch")
     if motion == "connector" and _body_has(text, ("demo", "pilot", "our product")):

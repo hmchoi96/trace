@@ -48,6 +48,7 @@ export function statusLabel(status: PersonStatus): string {
   if (status === "draft") return "Draft, not sent";
   if (status === "draft_failed") return "Draft failed";
   if (status === "approved") return "Approved, no draft yet";
+  if (status === "contact_not_found") return "Contact not found";
   if (status === "passed") return "Passed";
   if (status === "closed") return "Closed";
   if (status === "disqualified") return "Disqualified";

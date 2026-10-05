@@ -92,7 +92,7 @@ export function HuntFind({
         <Stat value="Web, LinkedIn, X" label="Where it searched" />
         <Stat
           value={String(found)}
-          label={`New people worth a look (cap ${hunt.limit})`}
+          label={`Meet the outreach bar (cap ${hunt.limit})`}
           tone="info"
         />
         <Stat value={String(skipCount)} label="Skipped, already in file" />
@@ -181,8 +181,9 @@ export function HuntFind({
               2. Skipped everyone already researched, closed, or disqualified in this profile.
             </Text>
             <Text>
-              3. Keeps a person only when there is a current owner and a reason to write.
-              Otherwise it searches the next one.
+              3. Keeps an outreach-ready candidate only when there is a current owner and a
+              reason to write. That is not the same as a found email. Otherwise it searches
+              the next one.
             </Text>
             <Text>4. Stopped. Contact lookup waits until you say yes.</Text>
           </Stack>

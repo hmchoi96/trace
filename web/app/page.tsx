@@ -355,6 +355,23 @@ export default function TracePage() {
     }
   }
 
+  async function huntReplacements(count: number) {
+    if (!profileId || count < 1) return;
+    setRecordError(null);
+    try {
+      const { huntId: newHuntId } = await api.createHunt(profileId, count, true);
+      writeStored(`trace.hunt.${profileId}`, newHuntId);
+      setHuntId(newHuntId);
+      setHunt(null);
+      setHuntNotice(null);
+      setScreen("find");
+      setMode("hunt");
+      void loadRecentHunts(profileId);
+    } catch (error) {
+      setRecordError(errorMessage(error));
+    }
+  }
+
   function resumeHunt(nextHuntId: string, nextScreen: Screen = "find") {
     if (!profileId) return;
     writeStored(`trace.hunt.${profileId}`, nextHuntId);
@@ -834,6 +851,7 @@ export default function TracePage() {
             onSentMyself={markSentMyself}
             onPullContact={pullContactFor}
             onPullContactsBulk={pullContactsBulk}
+            onHuntReplacements={(count) => void huntReplacements(count)}
             onSaveContact={saveContactFor}
             onRewriteDraft={rewriteDraft}
             onRefresh={() => {

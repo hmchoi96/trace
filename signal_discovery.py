@@ -1716,7 +1716,7 @@ A founder can be PRACTITIONER if they personally do the work (e.g. still making 
 A founder is BUILDER_OR_VENDOR if they are selling a solution for this problem.
 Do not treat "we should build a system for this" as a prospect signal.
 Do not use the shortcut: current title → not core user → reject.
-
+{_RESEARCH_RULES}
 Return JSON only:
 {{
   "person": {{
@@ -1738,7 +1738,8 @@ Return JSON only:
   "economic_buyer_likelihood": "UNKNOWN",
   "end_user_likelihood": "UNKNOWN",
   "recommendation": "PRIMARY_PROSPECT|CHAMPION_CANDIDATE|HIGH_VALUE_DISCOVERY|ADJACENT_PRACTITIONER|PAIN_SIGNAL_ONLY|LIKELY_PROSPECT|LIKELY_NOT_PROSPECT|LIKELY_NOT_RELEVANT|UNCLEAR",
-  "recommendation_reason": "one or two sentences, product-relative; lead with the behavior, then the role"
+  "recommendation_reason": "one or two sentences, product-relative; lead with the behavior, then the role",
+{_RESEARCH_JSON}
 }}
 """
 
@@ -1825,7 +1826,7 @@ If an older source and a newer source describe the same behavior, that corrobora
 STRENGTHENS the signal. Do not drop old evidence.
 
 Do not invent quotes or URLs. If nothing else exists, return an empty evidence list.
-
+{_RESEARCH_RULES}
 Return JSON only:
 {{
   "evidence": [
@@ -1847,7 +1848,8 @@ Return JSON only:
   "economic_buyer_likelihood": "UNKNOWN",
   "end_user_likelihood": "UNKNOWN",
   "recommendation": "",
-  "recommendation_reason": ""
+  "recommendation_reason": "",
+{_RESEARCH_JSON}
 }}
 """
 
@@ -1878,9 +1880,12 @@ def parse_deepening(raw_text: str) -> dict[str, Any]:
                 "why_relevant": str(item.get("why_relevant") or "").strip(),
             })
     person = payload.get("person") if isinstance(payload.get("person"), dict) else {}
+    from trace_research import parse_research
+
     return {
         "evidence": evidence,
         "axes": extract_axes(payload),
+        "research": parse_research(payload),
         "recommendation": str(payload.get("recommendation") or "").strip(),
         "recommendation_reason": str(payload.get("recommendation_reason") or "").strip(),
         "actor_type": str(payload.get("actor_type") or "").strip(),
@@ -1906,6 +1911,8 @@ def apply_deepening(
     extra: dict[str, Any],
     signal: dict[str, Any],
 ) -> dict[str, Any]:
+    from trace_research import merge_research
+
     merged = dict(qual)
     evidence = list(extra.get("evidence") or [])
     merged["supporting_evidence"] = evidence
@@ -1914,23 +1921,24 @@ def apply_deepening(
     if extra.get("recommendation"):
         merged["recommendation"] = extra["recommendation"]
     if extra.get("recommendation_reason"):
-        reason = extra["recommendation_reason"]
-        if merged.get("recommendation_reason") and reason not in merged["recommendation_reason"]:
-            merged["recommendation_reason"] = f"{merged['recommendation_reason']} {reason}".strip()
-        else:
-            merged["recommendation_reason"] = reason or merged.get("recommendation_reason") or ""
+        merged["recommendation_reason"] = extra["recommendation_reason"]
     dates = {
         str(signal.get("published_at") or "").strip(),
         *(str(ev.get("source_date") or "").strip() for ev in evidence),
     }
     dates.discard("")
+    corroboration: dict[str, Any] = {}
     if len(dates) >= 2:
-        note = (
-            " Same behavior appears across multiple dates ("
-            + ", ".join(sorted(dates))
-            + ")."
-        )
-        merged["recommendation_reason"] = (merged.get("recommendation_reason") or "") + note
+        urls = [str(ev.get("source_url") or "").strip() for ev in evidence if ev.get("source_url")]
+        urls = urls or [f"source date {item}" for item in sorted(dates)]
+        corroboration = {
+            "inferences": [{
+                "claim": "Same behavior appears across multiple dates (" + ", ".join(sorted(dates)) + ").",
+                "confidence": "high",
+                "based_on": urls,
+            }]
+        }
+    merged["research"] = merge_research(qual.get("research"), extra.get("research"), corroboration)
     merged["recommendation"] = derive_recommendation(
         actor_type=str(merged.get("actor_type") or ""),
         raw_recommendation=str(merged.get("recommendation") or ""),
@@ -1971,7 +1979,7 @@ Known signal:
 - Company: {person.get("company") or ""}
 - URL: {signal.get("source_url") or ""}
 - Quote: {signal.get("signal_text") or ""}
-
+{_RESEARCH_RULES}
 Return JSON only:
 {{
   "person": {{"name": "", "title": "", "company": "", "linkedin_url": ""}},
@@ -1985,7 +1993,8 @@ Return JSON only:
     }}
   ],
   "recommendation": "",
-  "recommendation_reason": ""
+  "recommendation_reason": "",
+{_RESEARCH_JSON}
 }}
 """
 
@@ -2024,6 +2033,7 @@ def _unresolved_qualification(signal: dict[str, Any]) -> dict[str, Any]:
             else "Relevant discussion found, but current role and relationship to the workflow could not be verified."
         ),
         "researched": False,
+        "research": {},
         **extract_axes({}),
     }
 
@@ -2055,7 +2065,10 @@ def qualify_signal(
         return _unresolved_qualification(signal)
     if not isinstance(payload, dict):
         return _unresolved_qualification(signal)
+    from trace_research import parse_research
+
     person = normalize_person(payload.get("person") if isinstance(payload.get("person"), dict) else payload, signal)
+    research = parse_research(payload)
     identity = payload.get("identity_resolved")
     axes = extract_axes(payload)
     unresolved = identity is False or (
@@ -2079,6 +2092,7 @@ def qualify_signal(
             ),
             "researched": True,
             "identity_resolved": False,
+            "research": research,
             **axes,
         }
     actor = normalize_actor(str(payload.get("actor_type") or ""))
@@ -2094,6 +2108,7 @@ def qualify_signal(
         "recommendation_reason": str(payload.get("recommendation_reason") or "").strip(),
         "researched": True,
         "identity_resolved": True,
+        "research": research,
         **axes,
     }
 
@@ -2117,6 +2132,29 @@ def _search_channel(
     return out
 
 
+_RESEARCH_RULES = """
+Structured research, kept separate from recommendation_reason.
+Do not put an inference in verified_facts.
+A relevant workflow is not an unresolved problem.
+gap_assessment.status is one of:
+- confirmed_gap: a source shows a current unresolved problem
+- possible_gap: the workflow is current and relevant, but the remaining problem is inferred
+- covered: the known workaround addresses the problem and no remaining gap is demonstrated
+- unknown: the evidence is not enough to tell whether a problem remains
+Every inference needs confidence (high, medium, or low) and based_on.
+"""
+
+_RESEARCH_JSON = """\
+  "research": {
+    "verified_facts": [{"claim": "", "source_url": "", "source_date": "", "quote_or_paraphrase": ""}],
+    "current_workarounds": [{"claim": "", "source_url": "", "source_date": ""}],
+    "inferences": [{"claim": "", "confidence": "high|medium|low", "based_on": [""]}],
+    "unknowns": [""],
+    "gap_assessment": {"status": "confirmed_gap|possible_gap|covered|unknown", "reason": "", "based_on": [""]},
+    "do_not_claim": [""]
+  }"""
+
+
 _REJECT_RECS = {"LIKELY_NOT_PROSPECT", "LIKELY_NOT_RELEVANT"}
 
 
@@ -2131,7 +2169,11 @@ def _needs_owner(rec: dict[str, Any]) -> bool:
 
 
 def _slot_kind(rec: dict[str, Any], profile: dict[str, Any]) -> str:
-    """ready | find_owner | verify_behavior | reject. Rejects do not take a hunt slot."""
+    """ready | find_owner | verify_behavior | reject.
+
+    ready means the person meets the outreach bar. It does not mean an email
+    was found. Rejects do not count toward the actionable target.
+    """
     actor = str(rec.get("actor_type") or "").upper()
     recommendation = str(rec.get("recommendation") or "").upper()
     if actor == "BUILDER_OR_VENDOR" or recommendation in _REJECT_RECS:
@@ -2152,6 +2194,8 @@ def _slot_kind(rec: dict[str, Any], profile: dict[str, Any]) -> str:
     rec["outreach_motion"] = assessment.get("motion")
     if assessment.get("draft_decision") == "send_now":
         return "ready"
+    if assessment.get("draft_decision") in ("no_draft", "change_recipient", "use_different_channel"):
+        return "reject"
     return "verify_behavior"
 
 
@@ -2173,6 +2217,9 @@ def _candidate_from_qual(
     )
     extra["identity_resolved"] = qual.get("identity_resolved")
     extra["deepened"] = bool(qual.get("deepened"))
+    from trace_research import research_from_record
+
+    extra["research"] = research_from_record({"research": qual.get("research") or {}})
     return build_candidate(
         signal=signal,
         person=qual.get("person"),
@@ -2252,7 +2299,7 @@ def _fill_actionable_slots(
     limit: int,
     seed_candidate_paths: list[str] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Keep searching until `limit` people can be contacted, or the review cap is hit."""
+    """Keep searching until `limit` outreach-ready candidates meet the bar, or the review cap is hit."""
     cap = max(limit, limit * SEARCH_CAP_FACTOR)
     ready: list[dict[str, Any]] = []
     reviewed = 0
@@ -2396,7 +2443,7 @@ def run_discovery(
         if slot_stats is not None:
             slot_stats.update(stats)
         print(
-            f"Actionable {stats['ready']} of {stats['target']} "
+            f"Outreach-ready {stats['ready']} of {stats['target']} "
             f"after reviewing {stats['reviewed']} (cap {stats['cap']})"
         )
         return rows

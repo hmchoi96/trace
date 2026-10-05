@@ -10,6 +10,7 @@ from trace_reply_reason import (
     MOTION_STRUCTURES,
     DraftBlocked,
     assess_reply_reason,
+    ensure_may_draft,
     reply_reason_hard_fails,
     sender_assets,
 )
@@ -179,10 +180,13 @@ def test_same_bdr_hiring_signal_depends_on_the_active_profile():
 def test_gate_does_not_branch_on_product_name():
     from pathlib import Path
 
-    src = Path(__file__).resolve().parents[1].joinpath("trace_reply_reason.py").read_text()
-    assert "Akashic" not in src
-    assert "Helix" not in src
-    assert "product_name ==" not in src
+    root = Path(__file__).resolve().parents[1]
+    for name in ("trace_reply_reason.py", "trace_research.py"):
+        src = root.joinpath(name).read_text()
+        assert "Akashic" not in src
+        assert "Helix" not in src
+        assert "Keycard" not in src
+        assert "product_name ==" not in src
 
 
 def test_helix_live_objection_problem_is_direct():
@@ -493,3 +497,173 @@ def test_profile_form_keeps_sender_assets():
         {"sender_assets": [{"id": "replay", "name": "Replay", "status": "verified"}]},
     )
     assert out["sender_assets"][0]["id"] == "replay"
+
+
+def _credential_profile():
+    return {
+        "product_name": "Credential bridge",
+        "product_context": "short-lived credentials for production agents",
+        "problem_definition": "standing credentials sprawl when production agents call internal systems",
+        "target_workflow": "issuing short-lived credentials for production agents",
+        "target_personas": "engineers who operate production agents",
+        "offer": "short-lived credentials for production agents",
+    }
+
+
+def _credential_rec(**extra):
+    rec = {
+        "outreach_role": "Practitioner",
+        "outreach_motion": "cold_product",
+        "owns_or_influences": True,
+        "name": "Amina Cole",
+        "identity_resolved": True,
+        "actor_type": "PRACTITIONER",
+        "recommendation": "LIKELY_PROSPECT",
+        "signal_text": (
+            "The named engineer owns the workflow for production agent credentials "
+            "and built an internal credentials proxy."
+        ),
+        "workflow_ownership_evidence": ["built the current credentials workflow"],
+    }
+    rec.update(extra)
+    return rec
+
+
+def test_covered_gap_does_not_send_on_a_relevant_workflow():
+    from signal_discovery import _slot_kind
+
+    rec = _credential_rec(
+        research={
+            "gap_assessment": {
+                "status": "covered",
+                "reason": "The internal proxy already addresses the known credential workflow.",
+                "based_on": ["https://example.com/proxy"],
+            }
+        }
+    )
+    out = assess_reply_reason(rec, _credential_profile())
+    assert out["trigger_offer_alignment"] == "direct"
+    assert out["trigger_type"] == "behavior_trigger"
+    assert out["draft_decision"] != "send_now"
+    assert out["draft_decision"] == "no_draft"
+    assert _slot_kind(rec, _credential_profile()) == "reject"
+    with pytest.raises(DraftBlocked):
+        ensure_may_draft(rec, _credential_profile())
+
+
+def test_confirmed_gap_can_send_when_the_offer_aligns():
+    rec = _credential_rec(
+        research={
+            "gap_assessment": {
+                "status": "confirmed_gap",
+                "reason": "A current source shows standing credentials still sprawl.",
+                "based_on": ["https://example.com/keys"],
+            }
+        }
+    )
+    out = assess_reply_reason(rec, _credential_profile())
+    assert out["draft_decision"] == "send_now"
+
+
+def test_unknown_gap_does_not_send_on_behavior_alone():
+    rec = _credential_rec(
+        research={"gap_assessment": {"status": "unknown", "reason": "No source shows a remaining gap.", "based_on": []}}
+    )
+    out = assess_reply_reason(rec, _credential_profile())
+    assert out["draft_decision"] == "research_more"
+    action = _credential_rec(
+        trigger_type="action_trigger",
+        research={"gap_assessment": {"status": "unknown", "reason": "", "based_on": []}},
+    )
+    sent = assess_reply_reason(action, _credential_profile())
+    assert sent["draft_decision"] == "send_now"
+
+
+def test_possible_gap_stays_an_inference_and_can_ask():
+    rec = _credential_rec(
+        signal_text=(
+            "A production agent uses GitHub, Slack, CI, observability, and internal data. "
+            "The engineer owns the workflow and documented user-delegated versus app credentials."
+        ),
+        research={
+            "verified_facts": [
+                {
+                    "claim": "Inspect is used in production with GitHub, Slack, CI, and internal systems.",
+                    "source_url": "https://example.com/inspect",
+                    "source_date": "2026-04-01",
+                    "quote_or_paraphrase": "Inspect runs in production across those systems.",
+                }
+            ],
+            "current_workarounds": [
+                {"claim": "Sandboxed VMs", "source_url": "https://example.com/inspect", "source_date": "2026-04-01"},
+                {"claim": "User-delegated tokens", "source_url": "https://example.com/inspect", "source_date": "2026-04-01"},
+            ],
+            "inferences": [
+                {
+                    "claim": "Cross-system authorization may still be fragmented.",
+                    "confidence": "medium",
+                    "based_on": ["https://example.com/inspect"],
+                }
+            ],
+            "unknowns": ["Whether a centralized authorization layer already exists."],
+            "gap_assessment": {
+                "status": "possible_gap",
+                "reason": "The remaining cross-system gap is inferred.",
+                "based_on": ["https://example.com/inspect"],
+            },
+            "do_not_claim": ["Do not claim the system has an unresolved security vulnerability."],
+        },
+    )
+    out = assess_reply_reason(rec, _credential_profile())
+    facts = [item["claim"] for item in rec["research"]["verified_facts"]]
+    assert "Cross-system authorization may still be fragmented." not in facts
+    assert out["draft_decision"] == "send_now"
+    assert "security hole" not in out["reason"].lower()
+    assert "inferred" in out["reason"].lower()
+    assert "inferred_gap_claimed_as_fact" in reply_reason_hard_fails(
+        "Their system has a security hole.", out
+    )
+    assert "inferred_gap_claimed_as_fact" not in reply_reason_hard_fails(
+        "How do you plan to manage authority across systems?", out
+    )
+
+
+def test_current_workflow_can_send_when_the_gap_is_confirmed():
+    rec = _credential_rec(
+        signal_text=(
+            "A small engineering team currently operates an agent across production systems. "
+            "The named engineer owns the workflow and uses standing API keys, short-lived "
+            "database tokens, and human write approval."
+        ),
+        research={
+            "verified_facts": [
+                {
+                    "claim": "The team uses standing API keys, short-lived database tokens, and human write approval.",
+                    "source_url": "https://example.com/agent",
+                    "source_date": "2026-03-01",
+                    "quote_or_paraphrase": "Standing API keys and short-lived database tokens.",
+                }
+            ],
+            "current_workarounds": [
+                {"claim": "Human write approval", "source_url": "https://example.com/agent", "source_date": "2026-03-01"}
+            ],
+            "inferences": [
+                {
+                    "claim": "Buyer authority is inferred from building the workflow.",
+                    "confidence": "medium",
+                    "based_on": ["https://example.com/agent"],
+                }
+            ],
+            "unknowns": ["Whether this operation was verified in the last quarter."],
+            "gap_assessment": {
+                "status": "confirmed_gap",
+                "reason": "Standing keys are still the current operating model.",
+                "based_on": ["https://example.com/agent"],
+            },
+        },
+    )
+    out = assess_reply_reason(rec, _credential_profile())
+    assert out["draft_decision"] == "send_now"
+    assert rec["research"]["inferences"][0]["claim"].startswith("Buyer authority")
+    assert "Buyer authority" not in rec["research"]["verified_facts"][0]["claim"]
+    assert rec["research"]["unknowns"]

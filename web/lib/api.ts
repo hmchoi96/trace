@@ -38,6 +38,7 @@ export type PersonDecision = "pending" | "yes" | "no";
 export type PersonStatus =
   | "researched"
   | "approved"
+  | "contact_not_found"
   | "draft"
   | "draft_failed"
   | "followup"
@@ -45,6 +46,36 @@ export type PersonStatus =
   | "passed"
   | "closed"
   | "disqualified";
+
+export type ResearchFact = {
+  claim: string;
+  sourceUrl: string;
+  sourceDate: string;
+  quoteOrParaphrase?: string;
+};
+
+export type ResearchInference = {
+  claim: string;
+  confidence: "high" | "medium" | "low" | string;
+  basedOn: string[];
+};
+
+export type ResearchRecord = {
+  verifiedFacts: ResearchFact[];
+  currentWorkarounds: ResearchFact[];
+  inferences: ResearchInference[];
+  unknowns: string[];
+  gapAssessment: { status: string; reason: string; basedOn: string[] };
+  doNotClaim: string[];
+};
+
+export type DecisionSummary = {
+  decision: string;
+  whyNow: string;
+  whyThisPerson: string;
+  replyReason: string;
+  doNotClaim: string;
+};
 
 export type DraftStatus = "pending" | "ready" | "failed" | "superseded";
 
@@ -93,6 +124,11 @@ export type Person = {
   secondaryRoles: string[];
   outreachMotion?: string;
   draftDecision?: string;
+  triggerOfferAlignment?: string;
+  gapStatus?: string;
+  contactStatus?: "contact_found" | "contact_not_found" | "not_looked_up" | string;
+  decisionSummary?: DecisionSummary | null;
+  research?: ResearchRecord | null;
   replyReason?: {
     motion: string;
     trigger_type: string;
@@ -157,6 +193,7 @@ export type HuntSummary = {
   status: HuntStatus;
   currentStage: string;
   candidateCount: number;
+  reviewed: number;
   error: string | null;
   createdAt: string | null;
   startedAt: string | null;
@@ -297,6 +334,7 @@ function normalizeHuntSummary(raw: Partial<HuntSummary> & Pick<HuntSummary, "id"
     status: raw.status,
     currentStage: raw.currentStage ?? "",
     candidateCount: raw.candidateCount ?? 0,
+    reviewed: raw.reviewed ?? 0,
     error: raw.error ?? null,
     createdAt: raw.createdAt ?? null,
     startedAt: raw.startedAt ?? null,
@@ -329,8 +367,8 @@ export const api = {
   },
   cost: (profileId: string, limit: number) =>
     request<Cost>(`/api/profiles/${encodeURIComponent(profileId)}/cost?limit=${limit}`),
-  createHunt: (profileId: string, limit: number) =>
-    post<{ huntId: string; jobId: string }>("/api/hunts", { profileId, limit }),
+  createHunt: (profileId: string, limit: number, replacement = false) =>
+    post<{ huntId: string; jobId: string }>("/api/hunts", { profileId, limit, replacement }),
   cancelHunt: (huntId: string) =>
     post<{ huntId: string; cancelled: boolean; alreadyFinished?: boolean }>(
       `/api/hunts/${encodeURIComponent(huntId)}/cancel`,

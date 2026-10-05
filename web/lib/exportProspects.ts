@@ -8,6 +8,7 @@ import {
   statusLabel,
   timestamp,
 } from "./format";
+import { hasStructuredResearch, researchSectionsHtml } from "./researchView";
 
 const SORT_NAMES: Record<string, string> = {
   added: "date added",
@@ -123,11 +124,53 @@ function briefLine(value: string | null | undefined): string {
   return raw.replace(/\s+/g, " ");
 }
 
+/** Local calendar day they were added to the campaign. A hunt lands as one day. */
+export function addedDayKey(person: Pick<Person, "createdAt">): string {
+  if (!person.createdAt) return "";
+  const parsed = new Date(person.createdAt);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${parsed.getFullYear()}-${month}-${day}`;
+}
+
+/** "today", "yesterday", or "Oct 5". */
+export function addedOnCaption(dayKey: string, now = new Date()): string {
+  const [year, month, day] = dayKey.split("-").map(Number);
+  if (!year || !month || !day) return dayKey;
+  const added = new Date(year, month - 1, day);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today.getTime() - added.getTime()) / 86_400_000);
+  if (diff === 0) return "today";
+  if (diff === 1) return "yesterday";
+  return added.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+export function addedDayGroups(
+  people: Pick<Person, "createdAt">[],
+  now = new Date(),
+): { key: string; count: number; label: string }[] {
+  const counts = new Map<string, number>();
+  for (const person of people) {
+    const key = addedDayKey(person);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([key, count]) => {
+      const caption = addedOnCaption(key, now);
+      const label = caption === "today" ? "Today" : caption === "yesterday" ? "Yesterday" : caption;
+      return { key, count, label: `${label} · ${count}` };
+    });
+}
+
 function scopeLine(args: {
   peopleCount: number;
   campaignCount: number;
   listTitle: string;
   foundOn: string;
+  addedOn: string;
   sortCaption: string;
   exportedAt: Date;
 }): string {
@@ -143,6 +186,7 @@ function scopeLine(args: {
   const bits = [`Exported ${when}`, count];
   if (args.listTitle !== "In this campaign") bits.push(args.listTitle);
   if (args.foundOn !== "All") bits.push(`Found on ${args.foundOn}`);
+  if (args.addedOn) bits.push(`Added ${args.addedOn}`);
   bits.push(`Sorted by ${args.sortCaption}`);
   return bits.join(" · ");
 }
@@ -151,80 +195,40 @@ function stat(value: number, label: string): string {
   return `<div class="stat"><b>${value}</b><span>${esc(label)}</span></div>`;
 }
 
-function tableColumns(showPhone: boolean): { label: string; width: string }[] {
-  if (showPhone) {
-    return [
-      { label: "Person", width: "13%" },
-      { label: "Company", width: "11%" },
-      { label: "Actor", width: "10%" },
-      { label: "Status", width: "13%" },
-      { label: "Email", width: "18%" },
-      { label: "Phone", width: "11%" },
-      { label: "Found on", width: "7%" },
-      { label: "Latest signal", width: "9%" },
-      { label: "Last event", width: "8%" },
-    ];
-  }
-  return [
-    { label: "Person", width: "15%" },
-    { label: "Company", width: "12%" },
-    { label: "Actor", width: "11%" },
-    { label: "Status", width: "15%" },
-    { label: "Email", width: "19%" },
-    { label: "Found on", width: "8%" },
-    { label: "Latest signal", width: "10%" },
-    { label: "Last event", width: "10%" },
-  ];
+const INDEX_COLUMNS = [
+  { label: "Person", width: "28%" },
+  { label: "Company", width: "22%" },
+  { label: "Status", width: "22%" },
+  { label: "Email", width: "28%" },
+];
+
+function tableColgroup(): string {
+  return `<colgroup>${INDEX_COLUMNS.map((column) => `<col style="width:${column.width}">`).join("")}</colgroup>`;
 }
 
-function tableColgroup(showPhone: boolean): string {
-  return `<colgroup>${tableColumns(showPhone)
-    .map((column) => `<col style="width:${column.width}">`)
-    .join("")}</colgroup>`;
+function tableHead(): string {
+  return INDEX_COLUMNS.map((column) => `<th>${column.label}</th>`).join("");
 }
 
-function tableHead(showPhone: boolean): string {
-  return tableColumns(showPhone)
-    .map((column) => `<th>${column.label}</th>`)
-    .join("");
-}
-
-function tableRow(person: Person, showPhone: boolean): string {
+function tableRow(person: Person): string {
   const email = person.email?.trim();
-  const phone = person.phone?.trim();
   const emailCell = email
     ? `<span class="strong">${emailHtml(email)}</span>${
         person.emailSource ? `<span class="muted">${text(person.emailSource)}</span>` : ""
       }`
     : `<span class="muted">Not found</span>`;
-  const cells = [
-    `<td><span class="strong">${text(person.name, "Unnamed")}</span>${
+  return `<tr>
+    <td><span class="strong">${text(person.name, "Unnamed")}</span>${
       person.title?.trim() ? `<span class="muted">${text(person.title)}</span>` : ""
-    }</td>`,
-    `<td>${text(person.company, "Not reported")}</td>`,
-    `<td>${text(actorName(person) || "Not reported")}</td>`,
-    `<td class="${statusClass(person.status)}">${text(statusLabel(person.status))}</td>`,
-    `<td>${emailCell}</td>`,
-    ...(showPhone
-      ? [
-          `<td>${
-            phone
-              ? `<span class="strong">${text(phone)}</span>${
-                  person.phoneSource ? `<span class="muted">${text(person.phoneSource)}</span>` : ""
-                }`
-              : `<span class="muted">Not found</span>`
-          }</td>`,
-        ]
-      : []),
-    `<td>${text(foundOnLabel(person))}</td>`,
-    `<td>${text(signalWhen(person))}</td>`,
-    `<td>${text(lastEvent(person))}</td>`,
-  ];
-  return `<tr>${cells.join("")}</tr>`;
+    }</td>
+    <td>${text(person.company, "Not reported")}</td>
+    <td class="${statusClass(person.status)}">${text(statusLabel(person.status))}</td>
+    <td>${emailCell}</td>
+  </tr>`;
 }
 
 function fact(label: string, value: string): string {
-  return `<div><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+  return `<tr><th>${esc(label)}</th><td>${value}</td></tr>`;
 }
 
 function personCard(person: Person): string {
@@ -280,12 +284,22 @@ function personCard(person: Person): string {
       ? recommendation
       : `${recommendation}.`
     : "Trace's read.";
+  const sections = hasStructuredResearch(person) ? researchSectionsHtml(person) : "";
   const read =
-    recommendation || reason
-      ? `<p class="read"><span class="label">${text(readLabel)}</span>${
-          reason ? ` ${text(reason)}` : ""
-        }</p>`
-      : "";
+    sections
+      ? ""
+      : recommendation || reason
+        ? `<p class="read"><span class="label">${text(readLabel)}</span>${
+            reason ? ` ${text(reason)}` : ""
+          }</p>`
+        : "";
+  const audit = joinParts([
+    person.draftDecision ? `Draft decision ${person.draftDecision}` : "",
+    person.outreachMotion ? `Motion ${person.outreachMotion}` : "",
+    person.triggerOfferAlignment ? `Alignment ${person.triggerOfferAlignment}` : "",
+    person.gapStatus ? `Gap ${person.gapStatus}` : "",
+    person.contactStatus ? `Contact ${person.contactStatus}` : "",
+  ]);
   const noteBlock =
     notes.length > 0
       ? `<h3>Notes</h3><ul class="notes">${notes
@@ -305,13 +319,17 @@ function personCard(person: Person): string {
   ]);
 
   return `<article class="person">
-    <h2>${text(person.name, "Unnamed")}</h2>
-    <p class="sub">${text(sub)}</p>
-    <dl>${facts.join("")}</dl>
+    <div class="person-head">
+      <h2>${text(person.name, "Unnamed")}</h2>
+      <p class="sub">${text(sub)}</p>
+      <table class="facts"><tbody>${facts.join("")}</tbody></table>
+    </div>
     ${quote}
     ${why}
     ${source}
     ${more}
+    ${audit ? `<p class="meta">${text(audit)}</p>` : ""}
+    ${sections}
     ${read}
     ${noteBlock}
   </article>`;
@@ -319,20 +337,8 @@ function personCard(person: Person): string {
 
 const CSS = `
 @page {
-  size: letter landscape;
-  margin: 0.55in 0.6in 0.65in;
-  @bottom-left {
-    content: "Trace";
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 9px;
-    color: #737373;
-  }
-  @bottom-right {
-    content: counter(page);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 9px;
-    color: #737373;
-  }
+  size: letter;
+  margin: 0.7in 0.75in;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -344,17 +350,21 @@ html, body {
   font-size: 12px;
   line-height: 1.45;
 }
-body { max-width: 1100px; margin: 0 auto; padding: 0 32px 72px; }
-a { color: #24506f; overflow-wrap: anywhere; }
+body { max-width: 720px; margin: 0 auto; padding: 0 28px 72px; }
+p, li, td, th, a, blockquote, h1, h2 {
+  overflow-wrap: anywhere;
+}
+a { color: #24506f; }
 .toolbar {
   position: sticky;
   top: 0;
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin: 0 -32px 28px;
-  padding: 12px 32px;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  margin: 0 -28px 28px;
+  padding: 12px 28px;
   background: #fff;
   border-bottom: 1px solid #e5e5e5;
 }
@@ -370,6 +380,11 @@ a { color: #24506f; overflow-wrap: anywhere; }
   padding: 7px 12px;
   cursor: pointer;
 }
+.toolbar button.secondary {
+  background: #fff;
+  color: #171717;
+  border: 1px solid #d4d4d4;
+}
 .toolbar p { margin: 0; color: #525252; font-size: 13px; }
 .kicker {
   margin: 28px 0 6px;
@@ -380,7 +395,7 @@ a { color: #24506f; overflow-wrap: anywhere; }
   text-transform: uppercase;
 }
 h1 { margin: 0; font-size: 28px; line-height: 1.15; font-weight: 600; letter-spacing: -0.02em; }
-.lede { margin: 8px 0 0; max-width: 70ch; color: #525252; font-size: 14px; }
+.lede { margin: 8px 0 0; color: #525252; font-size: 14px; }
 .meta { margin: 8px 0 0; color: #737373; font-size: 12px; }
 .stats { display: flex; flex-wrap: wrap; gap: 28px; margin: 22px 0 8px; }
 .stat b { display: block; font-size: 22px; line-height: 1.1; font-weight: 600; }
@@ -393,9 +408,9 @@ h2.section {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
-th {
-  padding: 0 10px 6px 0;
+table.index { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
+table.index th {
+  padding: 0 12px 6px 0;
   border-bottom: 1px solid #171717;
   color: #737373;
   font-size: 11px;
@@ -403,13 +418,11 @@ th {
   line-height: 1.3;
   text-align: left;
 }
-td {
-  padding: 7px 10px 7px 0;
+table.index td {
+  padding: 8px 12px 8px 0;
   border-bottom: 1px solid #e5e5e5;
   vertical-align: top;
-  overflow-wrap: break-word;
 }
-td:nth-last-child(-n + 2) { white-space: nowrap; }
 .strong { font-weight: 600; }
 .muted { display: block; margin-top: 1px; color: #737373; font-weight: 400; }
 .muted.inline, .muted.block { display: inline; }
@@ -418,12 +431,24 @@ td:nth-last-child(-n + 2) { white-space: nowrap; }
 .tone-warn { color: #6b5320; }
 .tone-danger { color: #7a3630; }
 .tone-muted { color: #737373; }
-article.person { padding: 16px 0 8px; border-top: 1px solid #e5e5e5; }
-article.person h2 { margin: 0; font-size: 16px; font-weight: 600; }
-.sub { margin: 2px 0 10px; color: #525252; }
-dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 18px; margin: 0 0 12px; }
-dt { color: #737373; font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
-dd { margin: 1px 0 0; overflow-wrap: anywhere; }
+article.person {
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid #e5e5e5;
+}
+article.person h2 { margin: 0; font-size: 22px; line-height: 1.2; font-weight: 600; }
+.sub { margin: 4px 0 14px; color: #525252; }
+table.facts { width: 100%; border-collapse: collapse; margin: 0 0 14px; }
+table.facts th {
+  width: 9em;
+  padding: 4px 12px 4px 0;
+  color: #737373;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  vertical-align: top;
+}
+table.facts td { padding: 4px 0; vertical-align: top; }
 blockquote {
   margin: 0;
   padding: 0 0 0 10px;
@@ -441,9 +466,16 @@ li .muted { display: inline; }
   .toolbar { display: none !important; }
   body { max-width: none; padding: 0; }
   a { color: inherit; text-decoration: none; }
-  thead { display: table-header-group; }
-  article.person h2, article.person .sub, article.person dl { break-after: avoid; }
-  tr, blockquote { break-inside: avoid; }
+  table.index thead { display: table-header-group; }
+  table.index tr { break-inside: avoid; page-break-inside: avoid; }
+  article.person {
+    break-before: page;
+    page-break-before: always;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+  .person-head { break-after: avoid; page-break-after: avoid; }
 }
 `;
 
@@ -453,8 +485,10 @@ export function buildProspectHtml(args: {
   campaignCount: number;
   listTitle: string;
   foundOn: string;
+  addedOn?: string;
   sortCaption: string;
   exportedAt?: Date;
+  hunt?: { target: number; reviewed: number; outreachReady: number } | null;
 }): string {
   const exportedAt = args.exportedAt ?? new Date();
   const showPhone = args.people.some((person) => Boolean(person.phone?.trim()));
@@ -469,6 +503,9 @@ export function buildProspectHtml(args: {
   const brief = briefLine(args.profile.huntDescription);
   const lede = product || brief ? `<p class="lede">${text(joinParts([product, brief]))}</p>` : "";
   const title = `${args.profile.name} prospects`;
+  const downloadName = `${
+    args.profile.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "prospects"
+  }.html`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -481,7 +518,8 @@ export function buildProspectHtml(args: {
 <body>
 <div class="toolbar">
   <button type="button" onclick="window.print()">Save as PDF</button>
-  <p>Print this page and choose Save as PDF. This bar is left out of the file.</p>
+  <button type="button" class="secondary" id="download-html">Download HTML</button>
+  <p>Save as PDF keeps one person to a page. This bar is left out.</p>
 </div>
 <p class="kicker">Trace · Prospect list</p>
 <h1>${text(args.profile.name)}</h1>
@@ -492,6 +530,7 @@ ${lede}
       campaignCount: args.campaignCount,
       listTitle: args.listTitle,
       foundOn: args.foundOn,
+      addedOn: args.addedOn ?? "",
       sortCaption: args.sortCaption,
       exportedAt,
     }),
@@ -501,15 +540,27 @@ ${lede}
   ${stat(withEmail, "With email")}
   ${stat(sent, "Sent")}
   ${showPhone ? stat(withPhone, "With phone") : ""}
+  ${args.hunt ? stat(args.hunt.target, "Hunt target") : ""}
+  ${args.hunt ? stat(args.hunt.reviewed, "Reviewed") : ""}
+  ${args.hunt ? stat(args.hunt.outreachReady, "Meet the outreach bar") : ""}
 </div>
 <h2 class="section">List</h2>
-<table>
-  ${tableColgroup(showPhone)}
-  <thead><tr>${tableHead(showPhone)}</tr></thead>
-  <tbody>${args.people.map((person) => tableRow(person, showPhone)).join("")}</tbody>
+<table class="index">
+  ${tableColgroup()}
+  <thead><tr>${tableHead()}</tr></thead>
+  <tbody>${args.people.map((person) => tableRow(person)).join("")}</tbody>
 </table>
-<h2 class="section">People</h2>
 ${args.people.map((person) => personCard(person)).join("\n")}
+<script>
+document.getElementById("download-html").onclick = function () {
+  var blob = new Blob(["<!DOCTYPE html>\\n" + document.documentElement.outerHTML], { type: "text/html;charset=utf-8" });
+  var link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = ${JSON.stringify(downloadName)};
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+</script>
 </body>
 </html>`;
 }

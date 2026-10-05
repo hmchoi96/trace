@@ -1165,4 +1165,140 @@ def test_fill_slots_finds_an_owner_for_a_company_signal():
     assert rows[0]["reply_reason"]["sender_asset"] == ""
 
 
+def _credential_profile():
+    return {
+        "product_name": "Credential bridge",
+        "product_context": "short-lived credentials for production agents",
+        "problem_definition": "standing credentials sprawl when production agents call internal systems",
+        "target_workflow": "issuing short-lived credentials for production agents",
+        "target_personas": "engineers who operate production agents",
+        "offer": "short-lived credentials for production agents",
+        "discovery": {
+            "product_name": "Credential bridge",
+            "what_it_does": "issues short-lived credentials for production agents",
+            "problems_it_solves": ["standing credentials for production agents"],
+            "target_users_or_buyers": "engineers who operate production agents",
+            "search_channels": ["web"],
+        },
+    }
+
+
+def test_covered_resolution_does_not_fill_a_slot_and_the_hunt_continues():
+    calls = {"resolution": 0}
+
+    def researcher(prompt, tools=None, **kwargs):
+        if "resolution researcher" in prompt:
+            calls["resolution"] += 1
+            return _json_result({
+                "person": {
+                    "name": "Burke Libbey",
+                    "title": "Engineer",
+                    "company": "Shopify",
+                    "linkedin_url": "https://linkedin.com/in/burke",
+                },
+                "actor_type": "PRACTITIONER",
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "Do not outreach from the known post.",
+                "research": {
+                    "gap_assessment": {
+                        "status": "covered",
+                        "reason": "The internal credentials proxy already covers the known workflow.",
+                        "based_on": ["https://example.com/burke"],
+                    },
+                    "current_workarounds": [
+                        {
+                            "claim": "Shopify already runs an internal credentials proxy.",
+                            "source_url": "https://example.com/burke",
+                            "source_date": "2026-05-01",
+                        }
+                    ],
+                },
+            })
+        if "identity researcher" in prompt and "internal credentials proxy" in prompt:
+            return _json_result({
+                "person": {
+                    "name": "Burke Libbey",
+                    "title": "Engineer",
+                    "company": "Shopify",
+                    "linkedin_url": "https://linkedin.com/in/burke",
+                },
+                "identity_resolved": True,
+                "actor_type": "PRACTITIONER",
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "Owns the production agent credential workflow.",
+                "research": {
+                    "gap_assessment": {
+                        "status": "unknown",
+                        "reason": "The remaining gap is not shown yet.",
+                        "based_on": [],
+                    }
+                },
+            })
+        if "identity researcher" in prompt:
+            return _json_result({
+                "person": {
+                    "name": "Nia Okonkwo",
+                    "title": "Engineer",
+                    "company": "Northline",
+                    "linkedin_url": "https://linkedin.com/in/nia",
+                },
+                "identity_resolved": True,
+                "actor_type": "PRACTITIONER",
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "Owns the current credential workflow.",
+                "research": {
+                    "verified_facts": [
+                        {
+                            "claim": "Standing credentials are still how production agents call internal systems.",
+                            "source_url": "https://example.com/nia",
+                            "source_date": "2026-06-01",
+                            "quote_or_paraphrase": "Standing credentials are still in use.",
+                        }
+                    ],
+                    "gap_assessment": {
+                        "status": "confirmed_gap",
+                        "reason": "A current source shows the credential problem is unresolved.",
+                        "based_on": ["https://example.com/nia"],
+                    },
+                },
+            })
+        if "Already reviewed" in prompt:
+            return _json_result({"signals": [{
+                "source": "web",
+                "source_url": "https://example.com/nia",
+                "author_name": "Nia Okonkwo",
+                "published_at": "2026-06-01",
+                "signal_text": "Nia owns the workflow for production agent credentials.",
+                "relevance": "highly_relevant",
+            }]})
+        return _json_result({"signals": [{
+            "source": "web",
+            "source_url": "https://example.com/burke",
+            "author_name": "Burke Libbey",
+            "published_at": "2026-05-01",
+            "signal_text": (
+                "Burke owns the workflow for production agent credentials "
+                "and built an internal credentials proxy."
+            ),
+            "relevance": "highly_relevant",
+        }]})
+
+    stats = {}
+    rows = run_discovery(
+        _credential_profile(),
+        list_name="credential_bridge",
+        profile_key="credential_bridge",
+        limit=1,
+        researcher=researcher,
+        fill_slots=True,
+        slot_stats=stats,
+    )
+    assert [row["name"] for row in rows] == ["Nia Okonkwo"]
+    assert rows[0]["draft_decision"] == "send_now"
+    assert "Burke" not in [row["name"] for row in rows]
+    assert stats["reviewed"] >= 2
+    assert stats["ready"] == 1
+    assert calls["resolution"] == 1
+
+
 

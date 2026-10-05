@@ -68,11 +68,17 @@ def _runs_path(name: str) -> str:
 # ── Hunts ───────────────────────────────────────────────────────────────────
 
 
-def create_hunt(conn, profile_id: str, limit: int) -> dict[str, Any]:
+def create_hunt(conn, profile_id: str, limit: int, replacement: bool = False) -> dict[str, Any]:
     profile = profiles.get_profile(conn, profile_id)
     if not profile:
         raise guards.GuardError("no_profile", f"Unknown profile '{profile_id}'.")
-    if limit not in HUNT_LIMITS:
+    if replacement:
+        if not 1 <= int(limit) <= 20:
+            raise guards.GuardError(
+                "bad_limit",
+                "A replacement hunt looks for 1 to 20 more people who meet the outreach bar.",
+            )
+    elif limit not in HUNT_LIMITS:
         raise guards.GuardError(
             "bad_limit", f"Hunt size must be one of {', '.join(map(str, HUNT_LIMITS))}."
         )
@@ -1185,7 +1191,9 @@ def create_draft(
             out.get("subject") or "",
             out.get("body") or "",
             out.get("verdict") or "failed",
-            1 if out.get("verdict") == drafting.VERDICT_SENDABLE else 0,
+            1
+            if out.get("verdict") == drafting.VERDICT_SENDABLE and _candidate_email(cand)
+            else 0,
             db.dumps(out.get("critique")) if out.get("critique") else None,
             out.get("error"),
             now_iso(),
@@ -1460,10 +1468,12 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
     rec = db.loads(row["candidate_json"], {})
     outreach = classify_outreach(rec)
     from trace_reply_reason import assess_reply_reason
+    from trace_research import decision_summary, gap_status, research_dto
 
     reply = rec.get("reply_reason") if isinstance(rec.get("reply_reason"), dict) else None
     if not reply or not reply.get("draft_decision"):
         reply = assess_reply_reason(rec)
+    summary = decision_summary(rec, reply)
     draft = latest_draft(conn, row["id"])
     send = latest_send(conn, row["id"])
     notes = conn.execute(
@@ -1500,7 +1510,12 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "secondaryRoles": outreach["secondary_roles"],
         "outreachMotion": reply.get("motion") or "",
         "draftDecision": reply.get("draft_decision") or "",
+        "triggerOfferAlignment": reply.get("trigger_offer_alignment") or "",
+        "gapStatus": reply.get("gap_status") or gap_status(rec),
+        "contactStatus": _contact_status(row),
         "replyReason": reply,
+        "decisionSummary": summary,
+        "research": research_dto(rec),
         "recommendation": rec.get("recommendation") or "",
         "recommendationReason": rec.get("recommendation_reason") or "",
         "linkedinUrl": rec.get("linkedin_url") or "",
@@ -1590,6 +1605,22 @@ def _send_dto(send: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _candidate_email(cand: dict[str, Any]) -> str:
+    email = str(cand.get("email") or "").strip()
+    if email:
+        return email
+    rec = db.loads(cand.get("candidate_json") or "{}", {})
+    return str(rec.get("email") or "").strip()
+
+
+def _contact_status(row: dict[str, Any]) -> str:
+    if str(row.get("email") or "").strip():
+        return "contact_found"
+    if row.get("enrich_state") == "attempted":
+        return "contact_not_found"
+    return "not_looked_up"
+
+
 def _status_of(row: dict[str, Any], draft: dict[str, Any] | None, send: Any) -> str:
     if row.get("outcome"):
         return row["outcome"]
@@ -1610,6 +1641,8 @@ def _status_of(row: dict[str, Any], draft: dict[str, Any] | None, send: Any) -> 
         if ds == "ready":
             return "draft"
     if row["decision"] == "yes":
+        if not str(row.get("email") or "").strip() and row.get("enrich_state") == "attempted":
+            return "contact_not_found"
         return "approved"
     return "researched"
 
