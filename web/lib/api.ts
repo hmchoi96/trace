@@ -148,6 +148,8 @@ export type Person = {
   draft: Draft | null;
   sentAt: string | null;
   sendMethod: "trace" | "self" | null;
+  replyQuality?: string | null;
+  firstReplyAt?: string | null;
   lastSend: {
     subject: string;
     body: string;
@@ -456,6 +458,11 @@ export const api = {
     );
     return rows.map((row) => normalizeHuntSummary(row as Partial<HuntSummary> & Pick<HuntSummary, "id" | "status">));
   },
+  syncReplies: (profileId: string) =>
+    post<{ mailbox: string; sends: number; scanned: number; humanReplies: number }>(
+      `/api/profiles/${encodeURIComponent(profileId)}/replies/sync`,
+      {},
+    ),
   cost: (profileId: string, limit: number, window = "all", start = "", end = "", huntId = "") => {
     const params = new URLSearchParams({ limit: String(limit), window });
     if (start) params.set("start", start);

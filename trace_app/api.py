@@ -173,6 +173,11 @@ def cost(
     return out
 
 
+@app.post("/api/profiles/{profile_id}/replies/sync")
+def sync_replies(profile_id: str) -> dict[str, Any]:
+    return _guarded(service.sync_mailbox_replies, conn(), profile_id)
+
+
 @app.post("/api/hunts")
 def create_hunt(payload: HuntRequest) -> dict[str, Any]:
     return _guarded(

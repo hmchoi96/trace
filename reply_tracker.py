@@ -218,6 +218,14 @@ def reply_folders() -> tuple[str, ...]:
     return parts or ("inbox",)
 
 
+def graph_messages_url(mailbox: str, folder: str) -> str:
+    """Application permissions have no /me. Read a specific mailbox."""
+    return (
+        f"https://graph.microsoft.com/v1.0/users/{mailbox}"
+        f"/mailFolders/{folder}/messages"
+    )
+
+
 def fetch_recent_folder_messages(
     since: datetime,
     *,
@@ -228,10 +236,7 @@ def fetch_recent_folder_messages(
 ) -> list[dict[str, Any]]:
     """Messages in one Graph mail folder received on or after `since` (UTC)."""
     since_s = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-    base = (
-        f"https://graph.microsoft.com/v1.0/users/{mailbox}"
-        f"/mailFolders/{folder}/messages"
-    )
+    base = graph_messages_url(mailbox, folder)
     params = {
         "$top": str(top),
         "$orderby": "receivedDateTime desc",

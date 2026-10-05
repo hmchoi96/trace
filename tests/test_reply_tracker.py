@@ -138,3 +138,11 @@ def test_folder_default_stays_inbox(monkeypatch):
     assert reply_folders() == ("inbox",)
     monkeypatch.setenv("REPLY_TRACK_FOLDERS", "inbox,archive,deleteditems")
     assert reply_folders() == ("inbox", "archive", "deleteditems")
+
+
+def test_graph_reads_a_mailbox_user_not_me():
+    from reply_tracker import graph_messages_url
+
+    url = graph_messages_url("sender@example.com", "inbox")
+    assert url.endswith("/users/sender@example.com/mailFolders/inbox/messages")
+    assert "/me/" not in url

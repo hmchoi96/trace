@@ -85,6 +85,8 @@ export default function TracePage() {
   const [costStart, setCostStart] = useState("");
   const [costEnd, setCostEnd] = useState("");
   const [costHunt, setCostHunt] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
+  const [replyNote, setReplyNote] = useState("");
   const [dataError, setDataError] = useState<string | null>(null);
 
   const [huntId, setHuntId] = useState<string | null>(null);
@@ -205,6 +207,24 @@ export default function TracePage() {
     }
   }, []);
 
+  async function checkReplies() {
+    if (!profileId) return;
+    setReplyBusy(true);
+    setReplyNote("");
+    try {
+      const result = await api.syncReplies(profileId);
+      setReplyNote(
+        `Checked ${result.scanned} mailbox messages against ${result.sends} sends. Human replies: ${result.humanReplies}.`,
+      );
+      await loadCost(profileId, huntLimit, costWindow, costStart, costEnd, costHunt);
+      await loadPeople(profileId);
+    } catch (error) {
+      setReplyNote(errorMessage(error));
+    } finally {
+      setReplyBusy(false);
+    }
+  }
+
   const loadRecentHunts = useCallback(async (id: string) => {
     try {
       setRecentHunts(await api.hunts(id));
@@ -222,6 +242,7 @@ export default function TracePage() {
     setRecordError(null);
     setDecideError(null);
     setStartError(null);
+    setReplyNote("");
     setHunt(null);
     setHuntNotice(null);
     setHuntId(readStored(`trace.hunt.${profileId}`));
@@ -895,6 +916,10 @@ export default function TracePage() {
               setCostEnd(end);
               setCostHunt(hunt);
             }}
+            mailboxReady={Boolean(health?.mailboxReady)}
+            replyNote={replyNote}
+            replyBusy={replyBusy}
+            onCheckReplies={() => void checkReplies()}
           />
         )}
 

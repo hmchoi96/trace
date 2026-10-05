@@ -77,10 +77,14 @@ function tableViewportHeight(visibleRows: number, withSend: boolean) {
   return LIST_HEADER_PX + visibleRows * row;
 }
 
+function isHumanReply(person: Person) {
+  return ["positive", "engaged", "neutral", "negative"].includes(person.replyQuality || "");
+}
+
 function matchesFilter(person: Person, filter: RecordFilter) {
   if (filter === "sent") return Boolean(person.sentAt) && person.status !== "disqualified";
   if (filter === "researched") return !person.sentAt;
-  if (filter === "replied") return false;
+  if (filter === "replied") return isHumanReply(person);
   return true;
 }
 
@@ -94,7 +98,7 @@ function filterTitle(filter: RecordFilter) {
 function emptyMessage(filter: RecordFilter) {
   if (filter === "sent") return "No one has been sent from this profile yet.";
   if (filter === "researched") return "No one is waiting on a send decision yet.";
-  if (filter === "replied") return "Replies are not tracked yet.";
+  if (filter === "replied") return "No human reply has been matched for this profile yet.";
   return "A hunt has not put anyone in this campaign yet.";
 }
 
@@ -126,6 +130,16 @@ function compareRows(a: Person, b: Person, key: SortKey, dir: SortDir) {
   const right = sortValue(b, key);
   if (typeof left === "number" && typeof right === "number") return (left - right) * mul;
   return String(left).localeCompare(String(right)) * mul;
+}
+
+function replyQualityLabel(quality: string) {
+  const labels: Record<string, string> = {
+    positive: "Positive",
+    engaged: "Engaged",
+    neutral: "Neutral",
+    negative: "Negative",
+  };
+  return labels[quality] || quality;
 }
 
 function rowTone(person: Person): Tone {
@@ -463,6 +477,12 @@ function RecordDetail({
                 </Text>
                 <Text weight="semibold">{person.lastSend.subject}</Text>
                 {person.lastSend.body && <Text>{person.lastSend.body}</Text>}
+                {person.replyQuality ? (
+                  <Text size="small">
+                    Human reply · {replyQualityLabel(person.replyQuality)}
+                    {person.firstReplyAt ? ` · ${timestamp(person.firstReplyAt)}` : ""}
+                  </Text>
+                ) : null}
               </Stack>
             )}
 
@@ -800,6 +820,7 @@ export function Records({
 
   const selected = rows.find((p) => p.id === selectedId) ?? rows[0];
   const sentCount = people.filter((p) => Boolean(p.sentAt)).length;
+  const repliedCount = people.filter((p) => isHumanReply(p)).length;
   const researchedCount = people.filter((p) => !p.sentAt).length;
   const traceSent = people.filter((p) => p.sentAt && p.sendMethod !== "self").length;
   const selfSent = people.filter((p) => p.sentAt && p.sendMethod === "self").length;
@@ -923,8 +944,8 @@ export function Records({
         />
         <ClickStat
           active={filter === "replied"}
-          value="0"
-          label="Replied — not tracked yet"
+          value={String(repliedCount)}
+          label="Human replies"
           onClick={() => pick("replied")}
         />
       </Row>

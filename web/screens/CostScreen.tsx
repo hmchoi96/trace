@@ -2,6 +2,7 @@
 
 import {
   BarChart,
+  Button,
   Callout,
   H2,
   H3,
@@ -72,6 +73,10 @@ export function CostScreen({
   end,
   huntId,
   onWindow,
+  mailboxReady,
+  replyNote,
+  replyBusy,
+  onCheckReplies,
 }: {
   profile: Profile;
   cost: Cost | null;
@@ -82,6 +87,10 @@ export function CostScreen({
   end: string;
   huntId: string;
   onWindow: (windowName: string, start?: string, end?: string, huntId?: string) => void;
+  mailboxReady: boolean;
+  replyNote: string;
+  replyBusy: boolean;
+  onCheckReplies: () => void;
 }) {
   if (!cost) {
     return (
@@ -172,6 +181,17 @@ export function CostScreen({
             : ""}
           {cost.excludedUsd != null ? ` Excluded from total: ${formatUnitCost(cost.excludedUsd)}.` : ""}
         </Text>
+        <Row gap={8} align="center">
+          <Button
+            variant="secondary"
+            disabled={replyBusy || !mailboxReady}
+            title={mailboxReady ? "Read the connected mailbox and match replies to sends" : "No mailbox is connected"}
+            onClick={onCheckReplies}
+          >
+            {replyBusy ? "Checking mailbox…" : "Check mailbox for replies"}
+          </Button>
+          {replyNote ? <Text size="small" tone="secondary">{replyNote}</Text> : null}
+        </Row>
       </Stack>
 
       <Stack gap={8}>

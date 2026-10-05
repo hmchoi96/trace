@@ -6,7 +6,7 @@ import copy
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import db, drafting, guards, profiles
@@ -1341,6 +1341,127 @@ def mark_sent_myself(conn, candidate_id: str) -> dict[str, Any]:
     return {"sendId": send_id, "alreadySent": False}
 
 
+MAILBOX_REPLY_FOLDERS = ("inbox", "archive", "deleteditems")
+
+
+def sync_mailbox_replies(
+    conn,
+    profile_id: str,
+    *,
+    fetch: Callable[..., list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Match mailbox replies to this profile's sends. Does not store mail bodies."""
+    if not guards.mailbox_ready():
+        raise guards.GuardError(
+            "no_mailbox",
+            "No mailbox is connected, so Trace cannot read replies.",
+        )
+    mailbox = guards.connected_mailbox()
+    sends = conn.execute(
+        "SELECT * FROM sends WHERE profile_id = ? ORDER BY sent_at ASC",
+        (profile_id,),
+    ).fetchall()
+    if not sends:
+        return {
+            "mailbox": mailbox,
+            "sends": 0,
+            "scanned": 0,
+            "humanReplies": 0,
+        }
+
+    earliest = min(
+        (_parse_sent(row["sent_at"]) for row in sends),
+        default=datetime.now(timezone.utc),
+    )
+    since = earliest - timedelta(days=1)
+    if fetch is None:
+        messages = _fetch_mailbox_messages(mailbox, since, MAILBOX_REPLY_FOLDERS)
+    else:
+        messages = fetch(mailbox, since, MAILBOX_REPLY_FOLDERS)
+
+    from reply_tracker import apply_reply_matches
+    from trace_economics import HUMAN_QUALITIES, sync_profile
+
+    outreach = [
+        {
+            "sent": True,
+            "to_email": row["to_email"],
+            "subject": row["subject"],
+            "body": row["body"],
+            "conversation_id": row["conversation_id"] or "",
+            "sent_at": row["sent_at"],
+            "candidate_id": row["candidate_id"],
+        }
+        for row in sends
+    ]
+    apply_reply_matches(outreach, messages)
+
+    chosen: dict[str, dict[str, Any]] = {}
+    for row in outreach:
+        if row.get("reply_status") != "replied":
+            continue
+        quality = str(row.get("reply_quality") or "").lower()
+        if quality not in HUMAN_QUALITIES:
+            continue
+        candidate_id = str(row["candidate_id"])
+        previous = chosen.get(candidate_id)
+        if previous and (previous.get("last_reply_at") or "") > (row.get("last_reply_at") or ""):
+            continue
+        chosen[candidate_id] = {
+            "reply_quality": quality,
+            "reply_status": "replied",
+            "first_reply_at": row.get("first_reply_at"),
+            "last_reply_at": row.get("last_reply_at"),
+            "matched_by": row.get("matched_by"),
+        }
+
+    for candidate_id, fields in chosen.items():
+        cand = conn.execute(
+            "SELECT candidate_json FROM candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if not cand:
+            continue
+        rec = db.loads(cand["candidate_json"], {})
+        rec.pop("reply_preview", None)
+        rec.pop("reply_subject", None)
+        rec.update(fields)
+        conn.execute(
+            "UPDATE candidates SET candidate_json = ? WHERE id = ?",
+            (db.dumps(rec), candidate_id),
+        )
+    conn.commit()
+    sync_profile(conn, profile_id)
+    return {
+        "mailbox": mailbox,
+        "sends": len(sends),
+        "scanned": len(messages),
+        "humanReplies": len(chosen),
+    }
+
+
+def _parse_sent(value: str | None) -> datetime:
+    from reply_tracker import _parse_iso
+
+    return _parse_iso(value) or datetime.now(timezone.utc)
+
+
+def _fetch_mailbox_messages(mailbox: str, since: datetime, folders: tuple[str, ...]) -> list[dict[str, Any]]:
+    import requests
+    from reply_tracker import _get_graph_token, fetch_recent_messages
+
+    try:
+        token = _get_graph_token()
+        return fetch_recent_messages(
+            since, token=token, mailbox=mailbox, folders=folders
+        )
+    except (requests.RequestException, EnvironmentError, OSError) as exc:
+        raise guards.GuardError(
+            "mailbox_read_failed",
+            "The mailbox rejected the reply check.",
+        ) from exc
+
+
 # ── Reads ───────────────────────────────────────────────────────────────────
 
 
@@ -1520,6 +1641,8 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "draft": _draft_dto(draft),
         "sentAt": send["sent_at"] if send else None,
         "sendMethod": send["method"] if send else None,
+        "replyQuality": str(rec.get("reply_quality") or "") or None,
+        "firstReplyAt": rec.get("first_reply_at") or None,
         "lastSend": _send_dto(send),
         "notes": [{"text": n["text"], "at": n["created_at"]} for n in notes],
         "costTrace": _cost_trace(conn, row),
