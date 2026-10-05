@@ -67,7 +67,7 @@ def test_akashic_acquisition_alone_does_not_send():
     assert out["draft_decision"] != "send_now"
 
 
-def test_akashic_active_memo_comparison_needs_a_verified_asset():
+def test_akashic_active_memo_comparison_drafts_without_naming_an_asset():
     rec = {
         "outreach_role": "Practitioner",
         "outreach_motion": "cold_product",
@@ -77,7 +77,8 @@ def test_akashic_active_memo_comparison_needs_a_verified_asset():
     held = assess_reply_reason(rec, _akashic())
     assert held["trigger_type"] == "behavior_trigger"
     assert held["trigger_offer_alignment"] == "direct"
-    assert held["draft_decision"] == "strengthen_offer"
+    assert held["draft_decision"] == "send_now"
+    assert held["sender_asset"] == ""
     sent = assess_reply_reason(
         rec,
         {
@@ -124,6 +125,64 @@ def test_helix_bdr_hiring_is_adjacent_and_does_not_send():
     )
     assert out["trigger_offer_alignment"] == "adjacent"
     assert out["draft_decision"] == "research_more"
+
+
+_BDR_HIRE = {
+    "outreach_role": "Practitioner",
+    "outreach_motion": "cold_product",
+    "signal_text": "The company is hiring a BDR.",
+}
+
+
+def _profile(*, problem, personas, context, workflow=""):
+    return {
+        "product_context": context,
+        "discovery": {
+            "problems_it_solves": [problem],
+            "target_users_or_buyers": personas,
+            "examples_of_problem_signals": [workflow] if workflow else [],
+        },
+    }
+
+
+def test_same_bdr_hiring_signal_depends_on_the_active_profile():
+    """One external signal is direct, adjacent, or unrelated by profile, not by product name."""
+    memo = _profile(
+        problem="comparing past IC memos and underwriting assumptions",
+        personas="investment professionals who underwrite deals",
+        context="reuse prior underwriting judgment when a similar deal appears",
+    )
+    calls = _profile(
+        problem="reps lose the live objection while scrolling a script",
+        personas="BDRs and the leaders who run their outbound calls",
+        context="surfaces the right script line during a live call",
+        workflow="hunting for the objection line mid-call",
+    )
+    ramp = _profile(
+        problem="onboarding a newly hired BDR before they start dialing",
+        personas="leaders who train new outbound hires",
+        context="training for a team that just hired a BDR",
+    )
+
+    unrelated = assess_reply_reason(_BDR_HIRE, memo)
+    adjacent = assess_reply_reason(_BDR_HIRE, calls)
+    direct = assess_reply_reason(_BDR_HIRE, ramp)
+
+    assert unrelated["trigger_offer_alignment"] == "unrelated"
+    assert unrelated["draft_decision"] == "no_draft"
+    assert adjacent["trigger_offer_alignment"] == "adjacent"
+    assert adjacent["draft_decision"] == "research_more"
+    assert direct["trigger_offer_alignment"] == "direct"
+    assert direct["draft_decision"] == "send_now"
+
+
+def test_gate_does_not_branch_on_product_name():
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("trace_reply_reason.py").read_text()
+    assert "Akashic" not in src
+    assert "Helix" not in src
+    assert "product_name ==" not in src
 
 
 def test_helix_live_objection_problem_is_direct():
@@ -246,10 +305,15 @@ def test_verified_workflow_and_asset_can_draft():
     assert out["sender_asset"] == "One-page public deal replay"
 
 
-def test_planned_asset_strengthens_offer_with_no_body():
-    from trace_app import drafting
-
-    out = drafting.build_draft(
+def test_planned_asset_does_not_block_the_draft_or_get_named():
+    out = assess_reply_reason(
+        {
+            "outreach_motion": "cold_product",
+            "outreach_role": "Practitioner",
+            "workflow_ownership_evidence": ["reopens memos every deal"],
+            "signal_text": "reopens memos every deal",
+            "trigger_offer_alignment": "direct",
+        },
         {
             "sender_assets": [
                 {
@@ -260,18 +324,9 @@ def test_planned_asset_strengthens_offer_with_no_body():
                 }
             ]
         },
-        {
-            "first_name": "A",
-            "outreach_motion": "cold_product",
-            "outreach_role": "Practitioner",
-            "workflow_ownership_evidence": ["reopens memos every deal"],
-            "signal_text": "reopens memos every deal",
-            "trigger_offer_alignment": "direct",
-        },
     )
-    assert out["verdict"] == "strengthen_offer"
-    assert out["body"] == ""
-    assert out["subject"] == ""
+    assert out["draft_decision"] == "send_now"
+    assert out["sender_asset"] == ""
 
 
 def test_expert_with_firsthand_narrow_question_can_draft():
@@ -364,7 +419,7 @@ def test_unverified_asset_claim_fails():
     )
     fails = reply_reason_hard_fails("I can send the one-page replay first.", assessment)
     assert "sender_asset_not_verified" in fails
-    assert assessment["draft_decision"] == "strengthen_offer"
+    assert assessment["draft_decision"] == "send_now"
 
 
 def test_verified_asset_claim_is_allowed():

@@ -76,8 +76,8 @@ REPLY_REASON_HARD_FAILS = (
 
 _ALIGNMENTS = ("direct", "adjacent", "unrelated", "unknown")
 
-# ponytail: token overlap against the profile's problem list. Replace when
-# discovery stores trigger_offer_alignment itself.
+# ponytail: token overlap against the active profile's problem, personas,
+# and assets. Replace when discovery stores trigger_offer_alignment itself.
 _GENERIC_TERMS = frozenset(
     """
     a an the and or of to for in on with from by at as is are was were be been
@@ -115,7 +115,13 @@ _PROBLEM_NOW = (
     "reopen",
     "reopening",
 )
-_SALES_FAMILY = ("sdr", "bdr", "cold call", "objection", "sales rep", "account executive", "mid-call", "script")
+_HIRE_STEMS = {"hiring": "hire", "hired": "hire", "hires": "hire"}
+_EVENT_STEMS = {
+    "hiring": frozenset({"hire"}),
+    "acquisition": frozenset({"acquisition", "acquire", "acquired"}),
+    "fundraising": frozenset({"fundraising", "raised", "series"}),
+    "implementing": frozenset({"implementing", "implement"}),
+}
 
 _ACTION_PHRASES = (
     "is hiring",
@@ -366,36 +372,46 @@ def infer_motion(rec: dict[str, Any], blob: str, role: str) -> str:
     return "cold_product"
 
 
-def _offer_parts(profile: dict[str, Any] | None) -> list[str]:
+def _bits(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _profile_text(profile: dict[str, Any] | None, *keys: str) -> str:
     profile = profile or {}
     disc = profile.get("discovery") or {}
     parts: list[str] = []
-    for key in ("problems_it_solves", "examples_of_problem_signals"):
-        parts.extend(str(x) for x in (disc.get(key) or []) if str(x).strip())
-    for key in ("what_it_does",):
-        if disc.get(key):
-            parts.append(str(disc[key]))
-    if profile.get("product_context"):
-        parts.append(str(profile["product_context"]))
-    return parts
+    for key in keys:
+        parts.extend(_bits(profile.get(key)))
+        parts.extend(_bits(disc.get(key)))
+    return " ".join(parts)
+
+
+def _asset_text(profile: dict[str, Any] | None) -> str:
+    parts: list[str] = []
+    for asset in sender_assets(profile):
+        parts.extend(_bits(asset.get("name")))
+        parts.extend(_bits(asset.get("description")))
+    return " ".join(parts)
 
 
 def _terms(text: str) -> set[str]:
-    found = set(re.findall(r"[a-z0-9][a-z0-9'+-]{3,}", (text or "").lower()))
+    found = set(re.findall(r"[a-z0-9][a-z0-9'+-]{2,}", (text or "").lower()))
     out: set[str] = set()
     for tok in found:
+        tok = _HIRE_STEMS.get(tok, tok)
         if tok in _GENERIC_TERMS:
             continue
-        if tok.endswith("s") and len(tok) > 5 and tok[:-1] not in _GENERIC_TERMS:
+        if tok.endswith("s") and not tok.endswith("ss") and len(tok) > 3 and tok[:-1] not in _GENERIC_TERMS:
             tok = tok[:-1]
-        if len(tok) < 5 or tok in _GENERIC_TERMS:
+        if len(tok) < 3 or tok in _GENERIC_TERMS:
             continue
         out.add(tok)
     return out
-
-
-def _offer_terms(profile: dict[str, Any] | None) -> set[str]:
-    return _terms(" ".join(_offer_parts(profile)))
 
 
 def _company_event(blob: str) -> str:
@@ -427,30 +443,50 @@ def infer_alignment(
     blob: str,
     profile: dict[str, Any] | None,
 ) -> str:
-    """How closely the trigger matches this profile's problem. Not the company being busy."""
+    """Compare the signal to the active profile. The product name is not an input."""
     explicit = _text(rec.get("trigger_offer_alignment")).lower()
     if explicit in _ALIGNMENTS:
         return explicit
-    if not profile or not _offer_parts(profile):
+    problem_terms = _terms(
+        _profile_text(
+            profile,
+            "problem_definition",
+            "problems_it_solves",
+            "what_it_does",
+            "offer",
+        )
+    )
+    workflow_terms = _terms(
+        _profile_text(profile, "target_workflow", "examples_of_problem_signals")
+    )
+    persona_terms = _terms(_profile_text(profile, "target_personas", "target_users_or_buyers"))
+    context_terms = _terms(_profile_text(profile, "product_context"))
+    asset_terms = _terms(_asset_text(profile))
+    offer_terms = problem_terms | workflow_terms | context_terms | asset_terms
+    if not offer_terms and not persona_terms:
         return "unknown"
-    shared = _offer_terms(profile) & _terms(blob)
+    signal_terms = _terms(blob)
+    shared_offer = signal_terms & offer_terms
+    shared_problem = signal_terms & problem_terms
+    near_terms = persona_terms | context_terms | asset_terms
     seeking = _has_any(blob, _SEEKING_PHRASES)
     problem_now = _has_any(blob, _PROBLEM_NOW)
     event = _company_event(blob)
-    if (seeking or problem_now) and shared:
-        return "direct"
-    if len(shared) >= 2 and not event:
-        return "direct"
-    if event == "hiring":
-        offer_blob = " ".join(_offer_parts(profile)).lower()
-        if _has_any(blob, _SALES_FAMILY) and _has_any(offer_blob, _SALES_FAMILY):
-            return "adjacent"
-        if shared:
-            return "adjacent"
-        return "unrelated"
     if event:
+        stems = _EVENT_STEMS.get(event, frozenset())
+        if stems & problem_terms and (shared_problem - stems):
+            return "direct"
+        if (seeking or problem_now) and shared_offer:
+            return "direct"
+        # Hiring can sit next to the persona. Other company events do not.
+        if event == "hiring" and (signal_terms & near_terms):
+            return "adjacent"
         return "unrelated"
-    if shared:
+    if (seeking or problem_now) and shared_offer:
+        return "direct"
+    if len(signal_terms & (problem_terms | workflow_terms | asset_terms)) >= 2:
+        return "direct"
+    if shared_offer or (signal_terms & persona_terms):
         return "adjacent"
     return "unknown"
 
@@ -560,7 +596,6 @@ def _decide(
 ) -> tuple[str, str, list[str]]:
     asset_status = asset["status"] if asset else ""
     verified = asset_status == "verified"
-    planned = asset_status == "planned"
     missing: list[str] = []
 
     if rec.get("owns_or_influences") is False and motion in ("cold_product", "direct_application"):
@@ -633,16 +668,10 @@ def _decide(
             return blocked
         if verified:
             return "send_now", "Verified workflow, directly tied to the offer, and a verified asset.", []
-        if planned:
-            return (
-                "strengthen_offer",
-                "Workflow matches the offer. The asset is only planned, so there is no email yet.",
-                ["verified_sender_asset"],
-            )
         return (
-            "strengthen_offer",
-            "Workflow matches the offer, but there is no sender asset the recipient can receive first.",
-            ["verified_sender_asset"],
+            "send_now",
+            "Workflow matches the offer. Draft from the campaign offer, and do not name an asset that is not verified.",
+            [],
         )
     if trigger == "topic_trigger":
         if alignment == "unrelated":

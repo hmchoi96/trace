@@ -1017,4 +1017,152 @@ def test_prompt_yes_no_defaults(monkeypatch):
     assert _prompt_yes_no("go?", default=False) is True
 
 
+def _json_result(payload):
+    return {"text": json.dumps(payload), "citations": []}
+
+
+def test_fill_slots_replaces_a_vendor_until_someone_is_actionable():
+    def researcher(prompt, tools=None, **kwargs):
+        if "Search ONLY X" in prompt:
+            return _json_result({"signals": []})
+        if "identity researcher" in prompt:
+            if "orchestrates" in prompt:
+                return _json_result({
+                    "person": {"name": "Kip", "title": "Founder", "company": "Adjacent", "linkedin_url": "https://linkedin.com/in/kip"},
+                    "identity_resolved": True,
+                    "actor_type": "BUILDER_OR_VENDOR",
+                    "recommendation": "LIKELY_NOT_PROSPECT",
+                    "recommendation_reason": "Building an adjacent solution.",
+                })
+            return _json_result({
+                "person": {"name": "Priya Shah", "title": "Principal", "company": "XYZ Capital", "linkedin_url": "https://linkedin.com/in/priya"},
+                "identity_resolved": True,
+                "actor_type": "PRACTITIONER",
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "Compares past IC memos on every deal.",
+            })
+        if "https://example.com/vendor" in prompt:
+            return _json_result({"signals": [{
+                "source": "web",
+                "source_url": "https://example.com/priya",
+                "author_name": "Priya Shah",
+                "published_at": "2026-08-14",
+                "signal_text": "The team currently compares past IC memos on every deal.",
+                "why_relevant": "Current memo comparison.",
+                "relevance": "highly_relevant",
+            }]})
+        return _json_result({"signals": [{
+            "source": "web",
+            "source_url": "https://example.com/vendor",
+            "author_name": "Kip",
+            "signal_text": "Funds should have a system that orchestrates their historical underwriting.",
+            "why_relevant": "vendor",
+            "relevance": "highly_relevant",
+        }]})
+
+    stats = {}
+    rows = run_discovery(
+        PRODUCT_PROFILES["akashic"],
+        list_name="akashic",
+        profile_key="akashic",
+        limit=1,
+        researcher=researcher,
+        fill_slots=True,
+        slot_stats=stats,
+    )
+    assert [r["name"] for r in rows] == ["Priya Shah"]
+    assert rows[0]["draft_decision"] == "send_now"
+    assert stats["reviewed"] == 2
+    assert stats["ready"] == 1
+
+
+def test_fill_slots_stops_at_the_cap_without_lowering_the_bar():
+    seen = {"n": 0}
+
+    def researcher(prompt, tools=None, **kwargs):
+        if "Search ONLY X" in prompt:
+            return _json_result({"signals": []})
+        if "identity researcher" in prompt:
+            return _json_result({
+                "person": {"name": "Kip", "title": "Founder", "company": "Adjacent"},
+                "identity_resolved": True,
+                "actor_type": "BUILDER_OR_VENDOR",
+                "recommendation": "LIKELY_NOT_PROSPECT",
+            })
+        seen["n"] += 1
+        n = seen["n"]
+        return _json_result({"signals": [{
+            "source": "web",
+            "source_url": f"https://example.com/vendor-{n}",
+            "author_name": f"Vendor {n}",
+            "signal_text": "We sell a system that orchestrates historical underwriting.",
+            "relevance": "highly_relevant",
+        }]})
+
+    stats = {}
+    rows = run_discovery(
+        PRODUCT_PROFILES["akashic"],
+        list_name="akashic",
+        profile_key="akashic",
+        limit=1,
+        researcher=researcher,
+        fill_slots=True,
+        slot_stats=stats,
+    )
+    assert rows == []
+    assert stats["reviewed"] == 5
+    assert stats["ready"] == 0
+    assert stats["cap"] == 5
+
+
+def test_fill_slots_finds_an_owner_for_a_company_signal():
+    def researcher(prompt, tools=None, **kwargs):
+        if "Search ONLY X" in prompt:
+            return _json_result({"signals": []})
+        if "resolution researcher" in prompt:
+            return _json_result({
+                "person": {
+                    "name": "Mina Cho",
+                    "title": "Principal",
+                    "company": "Northline",
+                    "linkedin_url": "https://linkedin.com/in/mina",
+                },
+                "actor_type": "PRACTITIONER",
+                "evidence": [{
+                    "source_url": "https://example.com/mina",
+                    "quote_or_paraphrase": "She currently compares past IC memos on every deal.",
+                }],
+                "recommendation": "LIKELY_PROSPECT",
+                "recommendation_reason": "She runs the comparison now.",
+            })
+        if "identity researcher" in prompt:
+            return _json_result({
+                "person": {"name": "", "company": "Northline"},
+                "identity_resolved": False,
+                "actor_type": "UNKNOWN",
+                "recommendation": "HIGH_VALUE_DISCOVERY",
+                "recommendation_reason": "Job post, person unknown.",
+            })
+        return _json_result({"signals": [{
+            "source": "web",
+            "source_url": "https://example.com/jobs/director",
+            "author_name": "Northline",
+            "signal_text": "The firm is hiring a director. The role compares past IC memos on every deal.",
+            "why_relevant": "Company is hiring into the workflow.",
+            "relevance": "highly_relevant",
+        }]})
+
+    rows = run_discovery(
+        PRODUCT_PROFILES["akashic"],
+        list_name="akashic",
+        profile_key="akashic",
+        limit=1,
+        researcher=researcher,
+        fill_slots=True,
+    )
+    assert [r["name"] for r in rows] == ["Mina Cho"]
+    assert rows[0]["draft_decision"] == "send_now"
+    assert rows[0]["reply_reason"]["sender_asset"] == ""
+
+
 

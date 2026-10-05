@@ -145,6 +145,7 @@ export type Hunt = {
   elapsedSec: number;
   remainingSec: number;
   progressPct: number;
+  reviewed: number;
   events: HuntEvent[];
   candidates: Person[];
 };
@@ -282,6 +283,7 @@ function normalizeHunt(raw: Partial<Hunt> & Pick<Hunt, "id" | "profileId" | "lim
     elapsedSec: raw.elapsedSec ?? 0,
     remainingSec: raw.remainingSec ?? 0,
     progressPct: raw.progressPct ?? 0,
+    reviewed: raw.reviewed ?? 0,
     events: raw.events ?? [],
     candidates: raw.candidates ?? [],
   };

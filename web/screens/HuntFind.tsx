@@ -64,6 +64,8 @@ export function HuntFind({
   const running = hunt.status === "queued" || hunt.status === "running";
   const candidates = hunt.candidates ?? [];
   const found = candidates.length;
+  const reviewed = hunt.reviewed ?? 0;
+  const short = hunt.status === "done" && reviewed > 0 && found < hunt.limit;
   const pending = candidates.filter((p) => p.decision === "pending").length;
   const activeStep = stepIndex(hunt.currentStage || hunt.status);
   const recentEvents = (hunt.events ?? []).slice(-8).reverse();
@@ -164,7 +166,9 @@ export function HuntFind({
 
       {!running && hunt.status === "done" && (
         <Callout tone="success" title="This hunt finished">
-          Found {found} new {found === 1 ? "person" : "people"} in {elapsed}.
+          {short
+            ? `Reviewed ${reviewed} candidates. ${found} of ${hunt.limit} meet the outreach bar.`
+            : `Found ${found} new ${found === 1 ? "person" : "people"} in ${elapsed}.`}
         </Callout>
       )}
 
@@ -176,13 +180,16 @@ export function HuntFind({
             <Text>
               2. Skipped everyone already researched, closed, or disqualified in this profile.
             </Text>
-            <Text>3. Deepened the new ones and matched LinkedIn or X.</Text>
+            <Text>
+              3. Keeps a person only when there is a current owner and a reason to write.
+              Otherwise it searches the next one.
+            </Text>
             <Text>4. Stopped. Contact lookup waits until you say yes.</Text>
           </Stack>
         </CardBody>
       </Card>
 
-      {hunt.status === "done" && found === 0 && (
+      {hunt.status === "done" && found === 0 && !short && (
         <Callout tone="neutral" title="This hunt found no new people">
           Everyone it surfaced was already in this file, or the search came back empty.
         </Callout>

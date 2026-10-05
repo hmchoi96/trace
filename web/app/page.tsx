@@ -300,10 +300,14 @@ export default function TracePage() {
       void loadRecentHunts(profileId);
       if (mode !== "hunt") {
         const count = hunt?.candidates.length ?? 0;
+        const reviewed = hunt?.reviewed ?? 0;
+        const limit = hunt?.limit ?? 0;
         setHuntNotice(
-          count > 0
-            ? `Hunt finished. Found ${count} new ${count === 1 ? "person" : "people"}.`
-            : "Hunt finished. No new people this time.",
+          reviewed > 0 && count < limit
+            ? `Reviewed ${reviewed} candidates. ${count} of ${limit} meet the outreach bar.`
+            : count > 0
+              ? `Hunt finished. Found ${count} new ${count === 1 ? "person" : "people"}.`
+              : "Hunt finished. No new people this time.",
         );
       }
     }

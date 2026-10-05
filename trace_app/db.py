@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS hunts (
     current_stage  TEXT NOT NULL DEFAULT '',
     started_at     TEXT,
     estimate_sec   INTEGER NOT NULL DEFAULT 0,
+    reviewed_n     INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     finished_at    TEXT
 );
@@ -200,4 +201,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE hunts ADD COLUMN started_at TEXT")
     if "estimate_sec" not in hunt_cols:
         conn.execute("ALTER TABLE hunts ADD COLUMN estimate_sec INTEGER NOT NULL DEFAULT 0")
+    if "reviewed_n" not in hunt_cols:
+        conn.execute("ALTER TABLE hunts ADD COLUMN reviewed_n INTEGER NOT NULL DEFAULT 0")
     conn.commit()

@@ -707,6 +707,30 @@ def test_dedupe_candidates_keeps_richest_row(conn):
     assert rows[0]["email"] == "larry@volitioncapital.com"
 
 
+def test_hunt_reports_when_the_bar_is_not_filled(conn, monkeypatch):
+    hunt = service.create_hunt(conn, "oneaway", 5)
+
+    def discovery(*_a, slot_stats=None, **_k):
+        if slot_stats is not None:
+            slot_stats["reviewed"] = 20
+        return [
+            fake_candidate("sig_one", name="Ada Lovelace", company="Analytical"),
+            fake_candidate("sig_two", name="Ken Ito", company="Northline"),
+        ]
+
+    import signal_discovery
+
+    monkeypatch.setattr(signal_discovery, "run_discovery", discovery)
+    added = service.run_hunt(conn, hunt["huntId"])
+    assert added == 2
+    dto = service.get_hunt(conn, hunt["huntId"])
+    assert dto["reviewed"] == 20
+    assert any(
+        "Reviewed 20 candidates. 2 of 5 meet the outreach bar." == event["message"]
+        for event in dto["events"]
+    )
+
+
 def test_hunt_stage_updates_work_from_thread_pool_workers(conn, monkeypatch):
     import signal_discovery
     from concurrent.futures import ThreadPoolExecutor

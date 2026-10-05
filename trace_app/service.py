@@ -244,6 +244,7 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
     def on_stage(stage: str, person_name: str = "") -> None:
         _on_hunt_stage(hunt_id, job_id, stage, person_name)
 
+    slot_stats: dict[str, int] = {}
     candidates = run_discovery(
         snapshot,
         list_name=profile_id,
@@ -255,6 +256,8 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
         cache_path=cache_path,
         seed_candidate_paths=[seed_path] if os.path.isfile(seed_path) else None,
         on_stage=on_stage,
+        fill_slots=True,
+        slot_stats=slot_stats,
     )
 
     append_hunt_event(conn, hunt_id, "saving", STAGE_LABELS["saving"])
@@ -264,10 +267,20 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
     added = _store_candidates(conn, hunt_id, profile_id, candidates)
     dedupe_candidates(conn, profile_id)
     _import_cost_events(conn, profile_id, hunt_id, cost_path)
-    append_hunt_event(conn, hunt_id, "done", f"Found {added} new people")
+    reviewed = int(slot_stats.get("reviewed") or 0)
+    target = int(hunt["limit_n"])
+    if reviewed and added < target:
+        done_msg = f"Reviewed {reviewed} candidates. {added} of {target} meet the outreach bar."
+    else:
+        done_msg = f"Found {added} new people"
+    append_hunt_event(conn, hunt_id, "done", done_msg)
     conn.execute(
-        "UPDATE hunts SET status = 'done', finished_at = ?, current_stage = 'done' WHERE id = ?",
-        (now_iso(), hunt_id),
+        """
+        UPDATE hunts
+        SET status = 'done', finished_at = ?, current_stage = 'done', reviewed_n = ?
+        WHERE id = ?
+        """,
+        (now_iso(), reviewed, hunt_id),
     )
     conn.commit()
     _export_candidates_jsonl(conn, profile_id, seed_path)
@@ -1382,6 +1395,7 @@ def _hunt_summary(conn, hunt: dict[str, Any]) -> dict[str, Any]:
         "status": hunt["status"],
         "currentStage": hunt.get("current_stage") or "",
         "candidateCount": int(hunt.get("candidate_count") or 0),
+        "reviewed": int(hunt.get("reviewed_n") or 0),
         "error": hunt.get("error"),
         "createdAt": hunt["created_at"],
         "startedAt": hunt.get("started_at"),
@@ -1421,6 +1435,7 @@ def get_hunt(conn, hunt_id: str) -> dict[str, Any] | None:
         "startedAt": hunt.get("started_at"),
         "finishedAt": hunt["finished_at"],
         "currentStage": hunt.get("current_stage") or "",
+        "reviewed": int(hunt.get("reviewed_n") or 0),
         "progress": job["progress"] if job else "",
         "jobStatus": job["status"] if job else None,
         "progressPct": _hunt_progress_pct(hunt.get("current_stage") or ""),

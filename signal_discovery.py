@@ -47,6 +47,7 @@ CLASSIFICATION_AXES = (
 )
 AXIS_LEVELS = ("VERY_HIGH", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 DEEPENING_BUDGET = 3
+SEARCH_CAP_FACTOR = 5
 CACHE_TTL_DAYS = 14
 _TRACKING_QUERY_KEYS = {
     "gt", "si", "ref", "source", "fbclid", "gclid", "mc_cid", "mc_eid",
@@ -1504,7 +1505,12 @@ E. INSTITUTIONAL_MEMORY — team/firm-level preservation (shared memory, onboard
 prior work, internal playbooks, knowledge transfer). Look for the behavior, not a slogan."""
 
 
-def discovery_prompt(ctx: dict[str, Any], limit: int, channel: str = "web") -> str:
+def discovery_prompt(
+    ctx: dict[str, Any],
+    limit: int,
+    channel: str = "web",
+    exclude_urls: list[str] | None = None,
+) -> str:
     if channel == "x":
         channel_rules = (
             "Search ONLY X (Twitter) with x_search. Posts, replies, and threads. "
@@ -1551,6 +1557,15 @@ def discovery_prompt(ctx: dict[str, Any], limit: int, channel: str = "web") -> s
             "INSTITUTIONAL_MEMORY|adjacent_reuse|other"
         )
         crm_rule = ""
+    exclude_block = ""
+    if exclude_urls:
+        lines = "\n".join(f"- {url}" for url in exclude_urls[:40] if url)
+        if lines:
+            exclude_block = (
+                "Already reviewed. Do not return these URLs or the same posts:\n"
+                + lines
+                + "\n"
+            )
     query_examples = ctx.get("search_query_examples") or []
     examples_block = ""
     if query_examples:
@@ -1587,7 +1602,7 @@ Solution-aware tool-seeking is weaker than first-person workflow behavior.
 
 {channel_rules}
 
-Find up to {limit} distinct public signals.
+{exclude_block}Find up to {limit} distinct public signals.
 
 Ranking / selection rules (apply on every product):
 1. Prefer identifiable people with a current professional identity.
@@ -1862,11 +1877,19 @@ def parse_deepening(raw_text: str) -> dict[str, Any]:
                 "latent_behavior": str(item.get("latent_behavior") or "").strip(),
                 "why_relevant": str(item.get("why_relevant") or "").strip(),
             })
+    person = payload.get("person") if isinstance(payload.get("person"), dict) else {}
     return {
         "evidence": evidence,
         "axes": extract_axes(payload),
         "recommendation": str(payload.get("recommendation") or "").strip(),
         "recommendation_reason": str(payload.get("recommendation_reason") or "").strip(),
+        "actor_type": str(payload.get("actor_type") or "").strip(),
+        "person": {
+            "name": str(person.get("name") or "").strip(),
+            "title": str(person.get("title") or "").strip(),
+            "company": str(person.get("company") or "").strip(),
+            "linkedin_url": str(person.get("linkedin_url") or "").strip(),
+        },
     }
 
 
@@ -1914,6 +1937,57 @@ def apply_deepening(
         axes=extract_axes(merged),
     )
     return merged
+
+
+def resolution_prompt(
+    ctx: dict[str, Any],
+    signal: dict[str, Any],
+    qual: dict[str, Any],
+    goal: str,
+) -> str:
+    person = qual.get("person") or {}
+    if goal == "find_owner":
+        question = (
+            "This source does not name the person who owns the workflow now. "
+            "Find that person at the same company. If the author has left, name the current owner. "
+            "Do not return another copy of the same post."
+        )
+    else:
+        question = (
+            "Is this person doing this work now, in production, and does the current "
+            "workaround leave a gap against the product problem in the brief? "
+            "Do not collect another quote of the same post."
+        )
+    return f"""You are Trace's resolution researcher. One public signal is not enough to contact someone.
+Answer only the question below. Use the active profile. Do not decide from the product name.
+
+{format_discovery_brief(ctx)}
+
+Question: {question}
+
+Known signal:
+- Name: {person.get("name") or signal.get("author_name") or ""}
+- Title: {person.get("title") or ""}
+- Company: {person.get("company") or ""}
+- URL: {signal.get("source_url") or ""}
+- Quote: {signal.get("signal_text") or ""}
+
+Return JSON only:
+{{
+  "person": {{"name": "", "title": "", "company": "", "linkedin_url": ""}},
+  "actor_type": "PRACTITIONER|BUILDER_OR_VENDOR|OTHER|UNKNOWN",
+  "evidence": [
+    {{
+      "source_url": "",
+      "source_date": "",
+      "quote_or_paraphrase": "",
+      "why_relevant": ""
+    }}
+  ],
+  "recommendation": "",
+  "recommendation_reason": ""
+}}
+"""
 
 
 def deepen_person(
@@ -2029,17 +2103,214 @@ def _search_channel(
     ctx: dict[str, Any],
     limit: int,
     channel: str,
+    exclude_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     tools = [{"type": "x_search"}] if channel == "x" else [{"type": "web_search"}]
     print(f"  [{channel}] searching…")
     out = fn(
-        discovery_prompt(ctx, limit, channel),
+        discovery_prompt(ctx, limit, channel, exclude_urls=exclude_urls),
         tools=tools,
         stage=f"discovery_{channel}",
     )
     n = len(parse_signal_list(out.get("text") or "", out.get("citations") or []))
     print(f"  [{channel}] {n} signals")
     return out
+
+
+_REJECT_RECS = {"LIKELY_NOT_PROSPECT", "LIKELY_NOT_RELEVANT"}
+
+
+def _needs_owner(rec: dict[str, Any]) -> bool:
+    if rec.get("identity_resolved") is False:
+        return True
+    if not str(rec.get("name") or "").strip():
+        return True
+    actor = str(rec.get("actor_type") or "").upper()
+    recommendation = str(rec.get("recommendation") or "").upper()
+    return actor == "UNKNOWN" and recommendation == "HIGH_VALUE_DISCOVERY"
+
+
+def _slot_kind(rec: dict[str, Any], profile: dict[str, Any]) -> str:
+    """ready | find_owner | verify_behavior | reject. Rejects do not take a hunt slot."""
+    actor = str(rec.get("actor_type") or "").upper()
+    recommendation = str(rec.get("recommendation") or "").upper()
+    if actor == "BUILDER_OR_VENDOR" or recommendation in _REJECT_RECS:
+        return "reject"
+    from trace_drafting import classify_outreach
+
+    role = classify_outreach(rec)["outreach_role"]
+    rec["outreach_role"] = role
+    if role == "Non-target":
+        return "reject"
+    if _needs_owner(rec):
+        return "find_owner"
+    from trace_reply_reason import assess_reply_reason
+
+    assessment = assess_reply_reason(rec, profile)
+    rec["reply_reason"] = assessment
+    rec["draft_decision"] = assessment.get("draft_decision")
+    rec["outreach_motion"] = assessment.get("motion")
+    if assessment.get("draft_decision") == "send_now":
+        return "ready"
+    return "verify_behavior"
+
+
+def _candidate_from_qual(
+    *,
+    signal: dict[str, Any],
+    qual: dict[str, Any],
+    list_name: str,
+    profile_key: str,
+    product_name: str,
+) -> dict[str, Any]:
+    extra = {k: qual[k] for k in CLASSIFICATION_AXES if k in qual}
+    if qual.get("supporting_evidence"):
+        extra["supporting_evidence"] = qual["supporting_evidence"]
+    extra["entity_key"] = entity_key_for(
+        (qual.get("person") or {}).get("name") or signal.get("author_name") or "",
+        (qual.get("person") or {}).get("company") or "",
+        signal.get("author_handle") or "",
+    )
+    extra["identity_resolved"] = qual.get("identity_resolved")
+    extra["deepened"] = bool(qual.get("deepened"))
+    return build_candidate(
+        signal=signal,
+        person=qual.get("person"),
+        actor_type=qual.get("actor_type") or "UNKNOWN",
+        recommendation=qual.get("recommendation") or "UNCLEAR",
+        recommendation_reason=qual.get("recommendation_reason") or "",
+        list_name=list_name,
+        profile_key=profile_key,
+        product_name=product_name,
+        researched=bool(qual.get("researched")),
+        extra=extra,
+    )
+
+
+def _apply_resolution(
+    qual: dict[str, Any],
+    extra: dict[str, Any],
+    signal: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    merged = apply_deepening(qual, extra, signal)
+    person = extra.get("person") or {}
+    signal = dict(signal)
+    if person.get("name"):
+        current = dict(merged.get("person") or {})
+        current.update({k: v for k, v in person.items() if v})
+        merged["person"] = current
+        merged["identity_resolved"] = True
+        signal["author_name"] = person["name"]
+    if extra.get("actor_type"):
+        merged["actor_type"] = normalize_actor(str(extra["actor_type"]))
+    merged["deepened"] = True
+    merged["recommendation"] = derive_recommendation(
+        actor_type=str(merged.get("actor_type") or ""),
+        raw_recommendation=str(merged.get("recommendation") or ""),
+        axes=extract_axes(merged),
+    )
+    return merged, signal
+
+
+def _search_wave(
+    fn: Callable[..., dict[str, Any]],
+    ctx: dict[str, Any],
+    profile_key: str,
+    limit: int,
+    exclude_urls: list[str],
+) -> list[dict[str, Any]]:
+    plan = discovery_channel_plan(ctx, limit)
+    found: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(2, max(1, len(plan)))) as pool:
+        futs = {
+            pool.submit(_search_channel, fn, ctx, n, ch, exclude_urls): ch
+            for ch, n in plan
+        }
+        for fut in as_completed(futs):
+            found[futs[fut]] = fut.result()
+    signals: list[dict[str, Any]] = []
+    for ch, _n in plan:
+        out = found.get(ch) or {}
+        items = parse_signal_list(out.get("text") or "", out.get("citations") or [])
+        if ch == "x":
+            for sig in items:
+                if not sig.get("source") or sig.get("source") == "web":
+                    sig["source"] = infer_source(sig.get("source_url") or "", "x")
+        signals.extend(items)
+    if profile_key == "akashic":
+        signals = [refine_akashic_signal(sig) for sig in signals]
+    return rank_signals(dedupe_signals(signals), prefer_web=bool(ctx.get("prefer_web")))
+
+
+def _fill_actionable_slots(
+    profile: dict[str, Any],
+    *,
+    fn: Callable[..., dict[str, Any]],
+    ctx: dict[str, Any],
+    list_name: str,
+    profile_key: str,
+    limit: int,
+    seed_candidate_paths: list[str] | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep searching until `limit` people can be contacted, or the review cap is hit."""
+    cap = max(limit, limit * SEARCH_CAP_FACTOR)
+    ready: list[dict[str, Any]] = []
+    reviewed = 0
+    seen: set[str] = set()
+    for seed_path in seed_candidate_paths or []:
+        for row in load_candidates(seed_path):
+            url = canonical_url(str(row.get("signal_url") or ""))
+            if url:
+                seen.add(url)
+    product_name = str(ctx.get("product_name") or profile.get("product_name") or "")
+    waves = 0
+    while len(ready) < limit and reviewed < cap and waves < SEARCH_CAP_FACTOR:
+        waves += 1
+        batch = _search_wave(fn, ctx, profile_key, min(limit, cap - reviewed), sorted(seen))
+        fresh = []
+        for sig in batch:
+            key = canonical_url(str(sig.get("source_url") or "")) or (sig.get("signal_text") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            fresh.append(sig)
+        if not fresh:
+            break
+        for sig in fresh:
+            if len(ready) >= limit or reviewed >= cap:
+                break
+            reviewed += 1
+            qual = qualify_signal(ctx, sig, researcher=fn)
+            rec = _candidate_from_qual(
+                signal=sig,
+                qual=qual,
+                list_name=list_name,
+                profile_key=profile_key,
+                product_name=product_name,
+            )
+            kind = _slot_kind(rec, profile)
+            if kind in ("find_owner", "verify_behavior"):
+                person = qual.get("person") or {}
+                resolved = fn(
+                    resolution_prompt(ctx, sig, qual, kind),
+                    tools=[{"type": "web_search"}],
+                    stage="deepening",
+                    person_name=person.get("name") or sig.get("author_name") or "",
+                    signal_url=sig.get("source_url") or "",
+                )
+                parsed = parse_deepening(resolved.get("text") or "" if isinstance(resolved, dict) else "")
+                qual, sig = _apply_resolution(qual, parsed, sig)
+                rec = _candidate_from_qual(
+                    signal=sig,
+                    qual=qual,
+                    list_name=list_name,
+                    profile_key=profile_key,
+                    product_name=product_name,
+                )
+                kind = "ready" if _slot_kind(rec, profile) == "ready" else "reject"
+            if kind == "ready":
+                ready.append(rec)
+    return ready, {"reviewed": reviewed, "ready": len(ready), "target": limit, "cap": cap}
 
 
 def run_discovery(
@@ -2054,6 +2325,8 @@ def run_discovery(
     cache_path: str | None = None,
     seed_candidate_paths: list[str] | None = None,
     on_stage: Callable[[str, str], None] | None = None,
+    fill_slots: bool = False,
+    slot_stats: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     ctx = discovery_context_from_profile(profile)
     inner = researcher or grok_research
@@ -2110,6 +2383,23 @@ def run_discovery(
                 f"web={web_b}/{web_a}  x={x_b}/{x_a}"
             )
         return result
+    if fill_slots:
+        rows, stats = _fill_actionable_slots(
+            profile,
+            fn=fn,
+            ctx=ctx,
+            list_name=list_name,
+            profile_key=profile_key,
+            limit=limit,
+            seed_candidate_paths=seed_candidate_paths,
+        )
+        if slot_stats is not None:
+            slot_stats.update(stats)
+        print(
+            f"Actionable {stats['ready']} of {stats['target']} "
+            f"after reviewing {stats['reviewed']} (cap {stats['cap']})"
+        )
+        return rows
     plan = discovery_channel_plan(ctx, limit)
     if on_stage:
         on_stage("search", "")
