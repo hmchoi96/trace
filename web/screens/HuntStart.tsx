@@ -13,7 +13,8 @@ import {
   Text,
 } from "../components/ui";
 import type { Cost, Profile } from "../lib/api";
-import { senderLine, usd } from "../lib/format";
+import { forecastLines } from "../lib/economicsView";
+import { senderLine } from "../lib/format";
 
 export function HuntStart({
   profile,
@@ -76,9 +77,21 @@ export function HuntStart({
       </Stack>
 
       {next ? (
-        <Callout tone="info" title={`This hunt, about ${usd(next.low)}–${usd(next.high)}`}>
-          Looking for up to {huntLimit} new people. {peopleFound} already in this file are
-          skipped. Search still runs. Full spend is under Cost.
+        <Callout
+          tone="info"
+          title={
+            next.enoughHistory
+              ? `This hunt, about ${forecastLines(next)[4]?.replace("Likely range: ", "")}`
+              : "Not enough completed hunts for a reliable estimate"
+          }
+        >
+          {forecastLines(next).map((line) => (
+            <div key={line}>{line}</div>
+          ))}
+          <div>
+            Looking for up to {huntLimit} outreach-ready people. {peopleFound} already in this
+            file are skipped. Search still runs.
+          </div>
         </Callout>
       ) : (
         <Callout tone="neutral" title="Loading the estimate for this hunt">

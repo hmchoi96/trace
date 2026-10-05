@@ -823,9 +823,10 @@ def test_hunt_records_cost_and_estimates_the_next_one(conn):
     summary = service.cost_summary(conn, "oneaway")
     assert summary["totalUsd"] == 1.5
     assert summary["hunts"] == 1
-    small = service.estimate_hunt_usd(conn, "oneaway", 3)
-    big = service.estimate_hunt_usd(conn, "oneaway", 20)
-    assert big["low"] > small["low"]
+    estimate = service.estimate_hunt_usd(conn, "oneaway", 5)
+    assert estimate["enoughHistory"] is False
+    assert estimate["maximumReviewed"] == 25
+    assert estimate["low"] is None
 
 
 # ── People view ─────────────────────────────────────────────────────────────

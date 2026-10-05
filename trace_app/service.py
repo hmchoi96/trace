@@ -25,6 +25,7 @@ STAGE_LABELS = {
     "qualify": "Qualifying people",
     "qualification": "Qualifying people",
     "deepening": "Deepening research",
+    "resolution": "Checking whether a gap remains",
     "saving": "Saving results",
     "done": "Finished",
 }
@@ -39,6 +40,7 @@ STAGE_PROGRESS = {
     "qualify": 55,
     "qualification": 55,
     "deepening": 75,
+    "resolution": 75,
     "saving": 90,
     "done": 100,
     "failed": 100,
@@ -179,7 +181,7 @@ def _stage_message(stage: str, person_name: str = "") -> str:
     normalized = _normalize_stage(stage)
     label = STAGE_LABELS.get(normalized, stage.replace("_", " ").capitalize())
     person = person_name.strip()
-    if person and normalized in ("qualify", "deepening"):
+    if person and normalized in ("qualify", "deepening", "resolution"):
         return f"{label}: {person}"
     return label
 
@@ -273,6 +275,10 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
     added = _store_candidates(conn, hunt_id, profile_id, candidates)
     dedupe_candidates(conn, profile_id)
     _import_cost_events(conn, profile_id, hunt_id, cost_path)
+    from trace_economics import record_review_batch, refresh_wave_allocations
+
+    record_review_batch(conn, profile_id, hunt_id, list(slot_stats.get("reviewed_people") or []))
+    refresh_wave_allocations(conn, hunt_id)
     reviewed = int(slot_stats.get("reviewed") or 0)
     target = int(hunt["limit_n"])
     if reviewed and added < target:
@@ -645,27 +651,16 @@ def _export_candidates_jsonl(conn, profile_id: str, path: str) -> None:
 
 def _import_cost_events(conn, profile_id: str, hunt_id: str, path: str) -> None:
     from signal_discovery import load_research_costs
+    from trace_economics import import_research_events
 
     if not os.path.isfile(path):
         return
-    for event in load_research_costs(path):
-        conn.execute(
-            """
-            INSERT INTO cost_events (id, profile_id, hunt_id, stage, cost_usd,
-                                     elapsed_sec, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                profiles.new_id("cost"),
-                profile_id,
-                hunt_id,
-                str(event.get("stage") or ""),
-                float(event.get("cost_usd") or 0),
-                float(event.get("elapsed_sec") or 0),
-                now_iso(),
-            ),
-        )
-    conn.commit()
+    import_research_events(
+        conn,
+        load_research_costs(path),
+        profile_id=profile_id,
+        hunt_id=hunt_id,
+    )
 
 
 # ── Decisions ───────────────────────────────────────────────────────────────
@@ -1527,6 +1522,7 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "sendMethod": send["method"] if send else None,
         "lastSend": _send_dto(send),
         "notes": [{"text": n["text"], "at": n["created_at"]} for n in notes],
+        "costTrace": _cost_trace(conn, row),
     }
 
 
@@ -1739,48 +1735,39 @@ def people(conn, profile_id: str) -> list[dict[str, Any]]:
     return [candidate_dto(conn, dict(r)) for r in rows]
 
 
-def cost_summary(conn, profile_id: str) -> dict[str, Any]:
-    rows = conn.execute(
-        "SELECT hunt_id, stage, SUM(cost_usd) AS cost FROM cost_events "
-        "WHERE profile_id = ? GROUP BY hunt_id, stage",
-        (profile_id,),
-    ).fetchall()
-    total = 0.0
-    by_stage: dict[str, float] = {}
-    by_hunt: dict[str, float] = {}
-    for r in rows:
-        cost = float(r["cost"] or 0)
-        total += cost
-        by_stage[r["stage"] or "other"] = by_stage.get(r["stage"] or "other", 0) + cost
-        by_hunt[r["hunt_id"] or ""] = by_hunt.get(r["hunt_id"] or "", 0) + cost
-    return {
-        "profileId": profile_id,
-        "totalUsd": round(total, 4),
-        "hunts": len(by_hunt),
-        "byStage": [{"stage": k, "usd": round(v, 4)} for k, v in sorted(by_stage.items())],
-        "byHunt": [{"huntId": k, "usd": round(v, 4)} for k, v in by_hunt.items()],
-    }
+def _cost_trace(conn, row: dict[str, Any]) -> dict[str, Any]:
+    from trace_economics import candidate_trace
+
+    profile = conn.execute("SELECT name FROM profiles WHERE id = ?", (row["profile_id"],)).fetchone()
+    return candidate_trace(conn, row, profile["name"] if profile else "")
 
 
-def estimate_hunt_usd(conn, profile_id: str, limit: int) -> dict[str, float]:
-    """Per-person average from this profile's own history, with a safe default."""
-    row = conn.execute(
-        "SELECT SUM(cost_usd) AS total FROM cost_events WHERE profile_id = ?",
-        (profile_id,),
-    ).fetchone()
-    hunts = conn.execute(
-        "SELECT COUNT(DISTINCT hunt_id) AS n FROM cost_events WHERE profile_id = ?",
-        (profile_id,),
-    ).fetchone()
-    people_found = conn.execute(
-        "SELECT COUNT(*) AS n FROM candidates WHERE profile_id = ?", (profile_id,)
-    ).fetchone()
-    total = float(row["total"] or 0)
-    found = int(people_found["n"] or 0)
-    per_person = (total / found) if (total and found) else 0.55
-    low = per_person * limit * 0.8
-    high = per_person * limit * 1.35
-    return {"low": round(low, 2), "high": round(high, 2)}
+def cost_summary(
+    conn,
+    profile_id: str,
+    *,
+    window: str = "all",
+    hunt_id: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    from trace_economics import campaign_report
+
+    return campaign_report(
+        conn,
+        profile_id,
+        window=window,
+        hunt_id=hunt_id,
+        start=start,
+        end=end,
+    )
+
+
+def estimate_hunt_usd(conn, profile_id: str, limit: int) -> dict[str, Any]:
+    """Ready-rate forecast. Too little history stays an explicit no-estimate."""
+    from trace_economics import forecast_profile
+
+    return forecast_profile(conn, profile_id, limit)
 
 
 # ── Jobs ────────────────────────────────────────────────────────────────────

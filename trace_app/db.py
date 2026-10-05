@@ -119,15 +119,54 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 
 CREATE TABLE IF NOT EXISTS cost_events (
-    id          TEXT PRIMARY KEY,
-    profile_id  TEXT NOT NULL,
-    hunt_id     TEXT,
-    stage       TEXT NOT NULL DEFAULT '',
-    cost_usd    REAL NOT NULL DEFAULT 0,
-    elapsed_sec REAL NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL
+    id                    TEXT PRIMARY KEY,
+    profile_id            TEXT NOT NULL,
+    hunt_id               TEXT,
+    candidate_id          TEXT,
+    entity_key            TEXT NOT NULL DEFAULT '',
+    stage                 TEXT NOT NULL DEFAULT '',
+    substage              TEXT NOT NULL DEFAULT '',
+    provider              TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT '',
+    source_channel        TEXT NOT NULL DEFAULT '',
+    signal_family         TEXT NOT NULL DEFAULT '',
+    signal_url            TEXT NOT NULL DEFAULT '',
+    request_id            TEXT NOT NULL DEFAULT '',
+    prompt_tokens         INTEGER,
+    cached_prompt_tokens  INTEGER,
+    reasoning_tokens      INTEGER,
+    completion_tokens     INTEGER,
+    web_calls_attempted   INTEGER,
+    web_calls_billable    INTEGER,
+    x_calls_attempted     INTEGER,
+    x_calls_billable      INTEGER,
+    quantity              REAL,
+    cost_usd              REAL,
+    elapsed_sec           REAL NOT NULL DEFAULT 0,
+    cost_scope            TEXT NOT NULL DEFAULT 'hunt',
+    allocation_method     TEXT NOT NULL DEFAULT 'direct',
+    category              TEXT NOT NULL DEFAULT 'research_api',
+    source_key            TEXT UNIQUE,
+    metadata_json         TEXT NOT NULL DEFAULT '{}',
+    created_at            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cost_profile ON cost_events(profile_id);
+CREATE INDEX IF NOT EXISTS idx_cost_hunt ON cost_events(hunt_id);
+
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id              TEXT PRIMARY KEY,
+    occurred_at     TEXT NOT NULL,
+    profile_id      TEXT NOT NULL,
+    hunt_id         TEXT,
+    candidate_id    TEXT,
+    entity_key      TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL,
+    source_channel  TEXT NOT NULL DEFAULT '',
+    signal_family   TEXT NOT NULL DEFAULT '',
+    source_key      TEXT NOT NULL UNIQUE,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_profile ON funnel_events(profile_id);
 
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,
@@ -203,4 +242,82 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE hunts ADD COLUMN estimate_sec INTEGER NOT NULL DEFAULT 0")
     if "reviewed_n" not in hunt_cols:
         conn.execute("ALTER TABLE hunts ADD COLUMN reviewed_n INTEGER NOT NULL DEFAULT 0")
+    _migrate_cost_events(conn)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS funnel_events (
+            id              TEXT PRIMARY KEY,
+            occurred_at     TEXT NOT NULL,
+            profile_id      TEXT NOT NULL,
+            hunt_id         TEXT,
+            candidate_id    TEXT,
+            entity_key      TEXT NOT NULL DEFAULT '',
+            event_type      TEXT NOT NULL,
+            source_channel  TEXT NOT NULL DEFAULT '',
+            signal_family   TEXT NOT NULL DEFAULT '',
+            source_key      TEXT NOT NULL UNIQUE,
+            metadata_json   TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_funnel_profile ON funnel_events(profile_id);
+        """
+    )
     conn.commit()
+
+
+def _migrate_cost_events(conn: sqlite3.Connection) -> None:
+    """Widen the original spend log. A missing historical dollar stays null, not zero."""
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(cost_events)").fetchall()}
+    if "source_key" in cols and cols["cost_usd"][3] == 0:
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cost_events_v2 (
+            id                    TEXT PRIMARY KEY,
+            profile_id            TEXT NOT NULL,
+            hunt_id               TEXT,
+            candidate_id          TEXT,
+            entity_key            TEXT NOT NULL DEFAULT '',
+            stage                 TEXT NOT NULL DEFAULT '',
+            substage              TEXT NOT NULL DEFAULT '',
+            provider              TEXT NOT NULL DEFAULT '',
+            model                 TEXT NOT NULL DEFAULT '',
+            source_channel        TEXT NOT NULL DEFAULT '',
+            signal_family         TEXT NOT NULL DEFAULT '',
+            signal_url            TEXT NOT NULL DEFAULT '',
+            request_id            TEXT NOT NULL DEFAULT '',
+            prompt_tokens         INTEGER,
+            cached_prompt_tokens  INTEGER,
+            reasoning_tokens      INTEGER,
+            completion_tokens     INTEGER,
+            web_calls_attempted   INTEGER,
+            web_calls_billable    INTEGER,
+            x_calls_attempted     INTEGER,
+            x_calls_billable      INTEGER,
+            quantity              REAL,
+            cost_usd              REAL,
+            elapsed_sec           REAL NOT NULL DEFAULT 0,
+            cost_scope            TEXT NOT NULL DEFAULT 'hunt',
+            allocation_method     TEXT NOT NULL DEFAULT 'direct',
+            category              TEXT NOT NULL DEFAULT 'research_api',
+            source_key            TEXT UNIQUE,
+            metadata_json         TEXT NOT NULL DEFAULT '{}',
+            created_at            TEXT NOT NULL
+        )
+        """
+    )
+    if cols:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cost_events_v2
+                (id, profile_id, hunt_id, stage, cost_usd, elapsed_sec, created_at,
+                 source_key, cost_scope, allocation_method, category, metadata_json)
+            SELECT id, profile_id, hunt_id, COALESCE(stage, ''), cost_usd,
+                   COALESCE(elapsed_sec, 0), created_at,
+                   id, 'hunt', 'direct', 'research_api', '{}'
+            FROM cost_events
+            """
+        )
+        conn.execute("DROP TABLE cost_events")
+    conn.execute("ALTER TABLE cost_events_v2 RENAME TO cost_events")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_profile ON cost_events(profile_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_hunt ON cost_events(hunt_id)")

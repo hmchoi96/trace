@@ -155,6 +155,7 @@ export type Person = {
     method: "trace" | "self" | null;
   } | null;
   notes: { text: string; at: string }[];
+  costTrace?: CostTrace | null;
 };
 
 export type HuntStatus = "queued" | "running" | "done" | "failed" | "cancelled";
@@ -205,13 +206,103 @@ export type HuntSummary = {
   progressPct: number;
 };
 
+export type CostStage = {
+  stage: string;
+  usd: number | null;
+  tracked: boolean;
+  calls: number;
+};
+
+export type CostFunnelRow = {
+  stage: string;
+  key: string;
+  people: number;
+  conversion: { num: number; den: number | null; rate: number | null };
+  unitCost: number | null;
+};
+
+export type CostAttribution = {
+  name: string;
+  spend: number | null;
+  reviewed: number;
+  ready: number;
+  sent: number;
+  humanReplies: number;
+  meaningfulReplies: number;
+  meetings: number;
+  costPerReady: number | null;
+  costPerMeaningful: number | null;
+};
+
+export type CostForecast = {
+  enoughHistory: boolean;
+  target: number;
+  expectedReviewed: number | null;
+  maximumReviewed: number;
+  expectedUsd: number | null;
+  low: number | null;
+  high: number | null;
+  readyRate: number | null;
+  rangeMethod: string;
+  message: string;
+};
+
+export type CostCounts = {
+  reviewed: number;
+  saved: number;
+  outreachReady: number;
+  contactFound: number;
+  sent: number;
+  humanReplies: number;
+  meaningfulReplies: number;
+  meetings: number;
+};
+
+export type CostTraceLine = {
+  label: string;
+  usd: number | null;
+  tracked: boolean;
+  allocated: boolean;
+};
+
+export type CostTrace = {
+  sourceChannel: string;
+  signalFamily: string;
+  huntLabel: string;
+  lines: CostTraceLine[];
+  totalUsd: number | null;
+};
+
 export type Cost = {
   profileId: string;
-  totalUsd: number;
+  scopeNote: string;
+  windowLabel: string;
+  attributionDays: number;
+  totalUsd: number | null;
+  untrackedEvents: number;
+  excludedUsd: number | null;
   hunts: number;
-  byStage: { stage: string; usd: number }[];
+  counts: CostCounts;
+  funnel: CostFunnelRow[];
+  unitCosts: {
+    reviewed: number | null;
+    outreachReady: number | null;
+    approved: number | null;
+    contactFound: number | null;
+    sent: number | null;
+    humanReply: number | null;
+    meaningfulReply: number | null;
+    meeting: number | null;
+    trial: number | null;
+    customer: number | null;
+  };
+  byStage: { stage: string; usd: number | null }[];
+  stages: CostStage[];
   byHunt: { huntId: string; usd: number }[];
-  nextHunt: { low: number; high: number };
+  bySource: CostAttribution[];
+  bySignal: CostAttribution[];
+  byHuntDetail: CostAttribution[];
+  nextHunt: CostForecast;
   limits: number[];
 };
 
@@ -365,8 +456,15 @@ export const api = {
     );
     return rows.map((row) => normalizeHuntSummary(row as Partial<HuntSummary> & Pick<HuntSummary, "id" | "status">));
   },
-  cost: (profileId: string, limit: number) =>
-    request<Cost>(`/api/profiles/${encodeURIComponent(profileId)}/cost?limit=${limit}`),
+  cost: (profileId: string, limit: number, window = "all", start = "", end = "", huntId = "") => {
+    const params = new URLSearchParams({ limit: String(limit), window });
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    if (huntId) params.set("huntId", huntId);
+    return request<Cost>(
+      `/api/profiles/${encodeURIComponent(profileId)}/cost?${params.toString()}`,
+    );
+  },
   createHunt: (profileId: string, limit: number, replacement = false) =>
     post<{ huntId: string; jobId: string }>("/api/hunts", { profileId, limit, replacement }),
   cancelHunt: (huntId: string) =>

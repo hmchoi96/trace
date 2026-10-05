@@ -2119,6 +2119,7 @@ def _search_channel(
     limit: int,
     channel: str,
     exclude_urls: list[str] | None = None,
+    wave_id: str = "",
 ) -> dict[str, Any]:
     tools = [{"type": "x_search"}] if channel == "x" else [{"type": "web_search"}]
     print(f"  [{channel}] searching…")
@@ -2126,6 +2127,7 @@ def _search_channel(
         discovery_prompt(ctx, limit, channel, exclude_urls=exclude_urls),
         tools=tools,
         stage=f"discovery_{channel}",
+        wave_id=wave_id,
     )
     n = len(parse_signal_list(out.get("text") or "", out.get("citations") or []))
     print(f"  [{channel}] {n} signals")
@@ -2266,12 +2268,13 @@ def _search_wave(
     profile_key: str,
     limit: int,
     exclude_urls: list[str],
+    wave_id: str = "",
 ) -> list[dict[str, Any]]:
     plan = discovery_channel_plan(ctx, limit)
     found: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(2, max(1, len(plan)))) as pool:
         futs = {
-            pool.submit(_search_channel, fn, ctx, n, ch, exclude_urls): ch
+            pool.submit(_search_channel, fn, ctx, n, ch, exclude_urls, wave_id): ch
             for ch, n in plan
         }
         for fut in as_completed(futs):
@@ -2303,6 +2306,7 @@ def _fill_actionable_slots(
     """Keep searching until `limit` outreach-ready candidates meet the bar, or the review cap is hit."""
     cap = max(limit, limit * SEARCH_CAP_FACTOR)
     ready: list[dict[str, Any]] = []
+    reviewed_people: list[dict[str, Any]] = []
     reviewed = 0
     seen: set[str] = set()
     for seed_path in seed_candidate_paths or []:
@@ -2314,7 +2318,10 @@ def _fill_actionable_slots(
     waves = 0
     while len(ready) < limit and reviewed < cap and waves < SEARCH_CAP_FACTOR:
         waves += 1
-        batch = _search_wave(fn, ctx, profile_key, min(limit, cap - reviewed), sorted(seen))
+        wave_id = f"wave-{waves}"
+        batch = _search_wave(
+            fn, ctx, profile_key, min(limit, cap - reviewed), sorted(seen), wave_id
+        )
         fresh = []
         for sig in batch:
             key = canonical_url(str(sig.get("source_url") or "")) or (sig.get("signal_text") or "").strip().lower()
@@ -2342,9 +2349,11 @@ def _fill_actionable_slots(
                 resolved = fn(
                     resolution_prompt(ctx, sig, qual, kind),
                     tools=[{"type": "web_search"}],
-                    stage="deepening",
+                    stage="resolution",
                     person_name=person.get("name") or sig.get("author_name") or "",
+                    entity_key=rec.get("entity_key") or "",
                     signal_url=sig.get("source_url") or "",
+                    wave_id=wave_id,
                 )
                 parsed = parse_deepening(resolved.get("text") or "" if isinstance(resolved, dict) else "")
                 qual, sig = _apply_resolution(qual, parsed, sig)
@@ -2358,7 +2367,21 @@ def _fill_actionable_slots(
                 kind = "ready" if _slot_kind(rec, profile) == "ready" else "reject"
             if kind == "ready":
                 ready.append(rec)
-    return ready, {"reviewed": reviewed, "ready": len(ready), "target": limit, "cap": cap}
+            reviewed_people.append({
+                "entity_key": rec.get("entity_key") or "",
+                "source_channel": rec.get("signal_source") or sig.get("source") or "",
+                "signal_family": rec.get("signal_family") or "",
+                "draft_decision": rec.get("draft_decision") or "",
+                "kind": kind,
+                "wave_id": wave_id,
+            })
+    return ready, {
+        "reviewed": reviewed,
+        "ready": len(ready),
+        "target": limit,
+        "cap": cap,
+        "reviewed_people": reviewed_people,
+    }
 
 
 def run_discovery(
@@ -2385,6 +2408,7 @@ def run_discovery(
         person_name = str(kwargs.pop("person_name", "") or "")
         entity_key = str(kwargs.pop("entity_key", "") or "")
         signal_url = str(kwargs.pop("signal_url", "") or "")
+        wave_id = str(kwargs.pop("wave_id", "") or "")
         if on_stage:
             on_stage(stage, person_name)
         started = time.monotonic()
@@ -2415,6 +2439,7 @@ def run_discovery(
             "x_calls_attempted": usage.get("x_calls_attempted"),
             "x_calls_billable": usage.get("x_calls_billable"),
             "cost_usd": usage.get("cost_usd"),
+            "wave_id": wave_id,
             "elapsed_sec": round(elapsed, 3),
             "evidence_count": _guess_evidence_count(result.get("text") or ""),
             "citation_count": len(result.get("citations") or []),

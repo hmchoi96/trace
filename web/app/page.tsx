@@ -81,6 +81,10 @@ export default function TracePage() {
   const [peopleLoading, setPeopleLoading] = useState(false);
   const [cost, setCost] = useState<Cost | null>(null);
   const [costLoading, setCostLoading] = useState(false);
+  const [costWindow, setCostWindow] = useState("all");
+  const [costStart, setCostStart] = useState("");
+  const [costEnd, setCostEnd] = useState("");
+  const [costHunt, setCostHunt] = useState("");
   const [dataError, setDataError] = useState<string | null>(null);
 
   const [huntId, setHuntId] = useState<string | null>(null);
@@ -182,10 +186,17 @@ export default function TracePage() {
     }
   }, []);
 
-  const loadCost = useCallback(async (id: string, limit: number) => {
+  const loadCost = useCallback(async (
+    id: string,
+    limit: number,
+    windowName = "all",
+    start = "",
+    end = "",
+    huntId = "",
+  ) => {
     setCostLoading(true);
     try {
-      setCost(await api.cost(id, limit));
+      setCost(await api.cost(id, limit, windowName, start, end, huntId));
     } catch (error) {
       setCost(null);
       setDataError(errorMessage(error));
@@ -220,8 +231,8 @@ export default function TracePage() {
 
   useEffect(() => {
     if (!profileId) return;
-    void loadCost(profileId, huntLimit);
-  }, [profileId, huntLimit, loadCost]);
+    void loadCost(profileId, huntLimit, costWindow, costStart, costEnd, costHunt);
+  }, [profileId, huntLimit, costWindow, costStart, costEnd, costHunt, loadCost]);
 
   /* ── Hunt polling ─────────────────────────────────────────────────────── */
 
@@ -296,7 +307,7 @@ export default function TracePage() {
 
     if (previousStatus.current !== "done" && huntStatus === "done") {
       void loadPeople(profileId);
-      void loadCost(profileId, huntLimit);
+      void loadCost(profileId, huntLimit, costWindow, costStart, costEnd, costHunt);
       void loadRecentHunts(profileId);
       if (mode !== "hunt") {
         const count = hunt?.candidates.length ?? 0;
@@ -325,6 +336,10 @@ export default function TracePage() {
     huntStatus,
     profileId,
     huntLimit,
+    costWindow,
+    costStart,
+    costEnd,
+    costHunt,
     loadPeople,
     loadCost,
     loadRecentHunts,
@@ -869,8 +884,17 @@ export default function TracePage() {
             profile={profile}
             cost={cost}
             loading={costLoading}
-            peopleFound={people.length}
             huntLimit={huntLimit}
+            windowName={costWindow}
+            start={costStart}
+            end={costEnd}
+            huntId={costHunt}
+            onWindow={(windowName, start = "", end = "", hunt = costHunt) => {
+              setCostWindow(windowName);
+              setCostStart(start);
+              setCostEnd(end);
+              setCostHunt(hunt);
+            }}
           />
         )}
 

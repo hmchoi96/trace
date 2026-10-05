@@ -123,30 +123,14 @@ def import_cost_logs(conn) -> int:
                 break
         if not profile_id:
             continue
-        for event in load_research_costs(path):
-            rid = str(event.get("run_id") or path)
-            exists = conn.execute(
-                "SELECT 1 FROM cost_events WHERE id = ?",
-                (f"legacy_{rid}_{event.get('stage')}_{imported}",),
-            ).fetchone()
-            if exists:
-                continue
-            conn.execute(
-                """
-                INSERT INTO cost_events (id, profile_id, hunt_id, stage, cost_usd,
-                                         elapsed_sec, created_at)
-                VALUES (?, ?, NULL, ?, ?, ?, ?)
-                """,
-                (
-                    profiles.new_id("cost"),
-                    profile_id,
-                    str(event.get("stage") or ""),
-                    float(event.get("cost_usd") or 0),
-                    float(event.get("elapsed_sec") or 0),
-                    service.now_iso(),
-                ),
-            )
-            imported += 1
+        from trace_economics import import_research_events
+
+        imported += import_research_events(
+            conn,
+            load_research_costs(path),
+            profile_id=profile_id,
+            hunt_id=None,
+        )
     conn.commit()
     return imported
 

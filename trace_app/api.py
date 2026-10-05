@@ -156,9 +156,18 @@ def hunts(profile_id: str, limit: int = 20) -> list[dict[str, Any]]:
 
 
 @app.get("/api/profiles/{profile_id}/cost")
-def cost(profile_id: str, limit: int = 5) -> dict[str, Any]:
+def cost(
+    profile_id: str,
+    limit: int = 5,
+    window: str = "all",
+    huntId: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> dict[str, Any]:
     c = conn()
-    out = service.cost_summary(c, profile_id)
+    out = service.cost_summary(
+        c, profile_id, window=window, hunt_id=huntId, start=start, end=end
+    )
     out["nextHunt"] = service.estimate_hunt_usd(c, profile_id, limit)
     out["limits"] = list(service.HUNT_LIMITS)
     return out

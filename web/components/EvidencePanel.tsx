@@ -2,7 +2,8 @@
 
 import { Callout, H3, Stack, Table, Text } from "./ui";
 import type { AdditionalSignal, Person, ResearchFact, ResearchInference } from "../lib/api";
-import { axisRows, draftHeld, foundOnLabel, reasonLines, sentenceCase, shortDate } from "../lib/format";
+import { formatStageCost } from "../lib/economicsView";
+import { axisRows, draftHeld, foundOnLabel, reasonLines, sentenceCase, shortDate, usd } from "../lib/format";
 import { hasStructuredResearch, sourceUrls } from "../lib/researchView";
 
 function ReasonText({
@@ -221,6 +222,29 @@ export function EvidencePanel({ person }: { person: Person }) {
         )}
         {axes.length > 0 && (
           <Table headers={["Axis", "Score"]} rows={axes.map((row) => [row[0], row[1]])} />
+        )}
+        {person.costTrace && (
+          <Stack gap={6}>
+            <H3>Tracked cost</H3>
+            <Text size="small" tone="secondary">
+              Source: {person.costTrace.sourceChannel}. Signal family: {person.costTrace.signalFamily}.{" "}
+              {person.costTrace.huntLabel}
+            </Text>
+            <Table
+              headers={["Stage", "Tracked cost"]}
+              columnAlign={["left", "right"]}
+              rows={[
+                ...person.costTrace.lines.map((line) => [
+                  line.allocated ? `${line.label} (allocated)` : line.label,
+                  formatStageCost(line.tracked, line.usd),
+                ]),
+                [
+                  "Total tracked cost",
+                  person.costTrace.totalUsd == null ? "Not tracked" : usd(person.costTrace.totalUsd),
+                ],
+              ]}
+            />
+          </Stack>
         )}
       </Stack>
     </Stack>

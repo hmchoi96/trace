@@ -175,10 +175,11 @@ def test_notes_and_outcome_survive_a_reload(client):
 
 
 def test_cost_endpoint_scales_the_estimate_with_hunt_size(client):
-    small = client.get("/api/profiles/oneaway/cost?limit=3").json()
-    big = client.get("/api/profiles/oneaway/cost?limit=20").json()
-    assert big["nextHunt"]["low"] > small["nextHunt"]["low"]
-    assert small["limits"] == [3, 5, 8, 12, 20]
+    body = client.get("/api/profiles/oneaway/cost?limit=5").json()
+    assert body["nextHunt"]["enoughHistory"] is False
+    assert body["nextHunt"]["maximumReviewed"] == 25
+    assert body["scopeNote"]
+    assert body["limits"] == [3, 5, 8, 12, 20]
 
 
 def test_patch_contact_saves_manual_email(client):
