@@ -908,7 +908,6 @@ export default function TracePage() {
             profile={profile}
             cost={cost}
             loading={costLoading}
-            huntLimit={huntLimit}
             windowName={costWindow}
             start={costStart}
             end={costEnd}
@@ -919,10 +918,6 @@ export default function TracePage() {
               setCostEnd(end);
               setCostHunt(hunt);
             }}
-            mailboxReady={Boolean(health?.mailboxReady)}
-            replyNote={replyNote}
-            replyBusy={replyBusy}
-            onCheckReplies={() => void checkReplies()}
           />
         )}
 

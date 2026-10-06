@@ -31,7 +31,7 @@ export function HuntReview({
   onNext: () => void;
 }) {
   const candidates = hunt?.candidates ?? [];
-  const pending = candidates.filter((p) => p.decision === "pending");
+  const pending = candidates.filter((p) => p.decision === "pending" && p.status !== "unfit");
   const person = pending[0];
   const decidedCount = candidates.length - pending.length;
 

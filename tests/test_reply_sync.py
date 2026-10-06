@@ -102,8 +102,9 @@ def test_a_human_reply_is_stored_without_the_mail_body(conn):
     assert len(rows) == 1
     assert json.loads(rows[0][0]) == {"reply_quality": "positive"}
     report = service.cost_summary(conn, "oneaway")
-    assert report["legacyExcluded"]["humanReplies"] == 1
-    assert report["counts"]["humanReplies"] == 0
+    assert report["counts"]["sent"] == 1
+    assert report["counts"]["humanReplies"] == 1
+    assert report["counts"]["meaningfulReplies"] == 1
 
 
 def test_an_automated_reply_does_not_count(conn):
@@ -139,7 +140,8 @@ def test_checking_twice_does_not_duplicate_the_person(conn):
     assert count == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM mailbox_replies").fetchone()["n"] == 1
     report = service.cost_summary(conn, "oneaway")
-    assert report["legacyExcluded"]["sent"] == 1
+    assert report["counts"]["sent"] == 1
+    assert report["counts"]["humanReplies"] == 1
 
 
 def test_a_later_classification_updates_the_same_reply(conn):
@@ -169,8 +171,7 @@ def test_a_later_classification_updates_the_same_reply(conn):
     assert len(rows) == 1
     assert json.loads(rows[0][0])["reply_quality"] == "negative"
     report = service.cost_summary(conn, "oneaway")
-    assert report["counts"]["humanReplies"] == 0
-    assert report["legacyExcluded"]["humanReplies"] == 1
+    assert report["counts"]["humanReplies"] == 1
     assert report["counts"]["meaningfulReplies"] == 0
 
 
@@ -199,10 +200,13 @@ def test_two_replies_in_one_thread_stay_one_person(conn):
     rec = json.loads(
         conn.execute("SELECT candidate_json FROM candidates WHERE id = 'cand_troy'").fetchone()[0]
     )
-    assert rec["reply_quality"] == "negative"
-    assert report["counts"]["humanReplies"] == 0
-    assert report["legacyExcluded"]["sent"] == 1
-    assert report["legacyExcluded"]["humanReplies"] == 1
+    assert rec["reply_quality"] == "positive"
+    assert report["counts"]["humanReplies"] == 1
+    assert report["counts"]["meaningfulReplies"] == 1
+    assert report["counts"]["sent"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM funnel_events WHERE event_type = 'human_reply'"
+    ).fetchone()["n"] == 2
 
 
 def test_reply_check_requires_a_mailbox(conn, monkeypatch):

@@ -2306,6 +2306,7 @@ def _fill_actionable_slots(
     """Keep searching until `limit` outreach-ready candidates meet the bar, or the review cap is hit."""
     cap = max(limit, limit * SEARCH_CAP_FACTOR)
     ready: list[dict[str, Any]] = []
+    unfit: list[dict[str, Any]] = []
     reviewed_people: list[dict[str, Any]] = []
     reviewed = 0
     seen: set[str] = set()
@@ -2373,6 +2374,15 @@ def _fill_actionable_slots(
             aliases = [early_key] if early_key and early_key != final_key else []
             if kind == "ready":
                 ready.append(rec)
+            elif kind == "reject":
+                reply = rec.get("reply_reason") if isinstance(rec.get("reply_reason"), dict) else {}
+                rec["trace_fit"] = "unfit"
+                rec["unfit_reason"] = str(
+                    reply.get("reason")
+                    or rec.get("recommendation_reason")
+                    or "Reviewed and held back. They do not meet the outreach bar."
+                )
+                unfit.append(rec)
             reviewed_people.append({
                 "entity_key": final_key,
                 "entity_aliases": aliases,
@@ -2388,6 +2398,7 @@ def _fill_actionable_slots(
         "target": limit,
         "cap": cap,
         "reviewed_people": reviewed_people,
+        "unfit_people": unfit,
     }
 
 

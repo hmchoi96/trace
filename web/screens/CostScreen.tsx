@@ -1,26 +1,12 @@
 "use client";
 
-import {
-  BarChart,
-  Button,
-  Callout,
-  H2,
-  H3,
-  Pill,
-  Row,
-  Stack,
-  Stat,
-  Table,
-  Text,
-} from "../components/ui";
+import { useState } from "react";
+import { H2, H3, Pill, Row, Select, Stack, Stat, Table, Text } from "../components/ui";
 import type { Cost, CostAttribution, Profile } from "../lib/api";
 import {
-  ALLOCATED_DISCOVERY,
-  MEANINGFUL_REPLY,
-  READY_IS_NOT_CONTACT,
   TRACKED_SCOPE,
-  forecastLines,
   formatRatio,
+  formatShare,
   formatStageCost,
   formatUnitCost,
 } from "../lib/economicsView";
@@ -31,93 +17,75 @@ const WINDOWS = [
   { id: "30d", label: "Last 30 days" },
 ];
 
-function Tip({ label, tip }: { label: string; tip: string }) {
-  return <span title={tip}>{label}</span>;
-}
+const BREAKDOWNS = [
+  { value: "source", label: "Source" },
+  { value: "signal", label: "Signal" },
+  { value: "campaign", label: "Campaign" },
+  { value: "hunt", label: "Hunt" },
+];
 
 function attributionRows(rows: CostAttribution[]) {
   return rows.map((row) => [
     row.name,
-    row.spend == null ? "Not tracked" : formatUnitCost(row.spend),
+    row.spend == null ? "—" : formatUnitCost(row.spend),
     String(row.reviewed),
     String(row.ready),
-    String(row.sent),
-    String(row.humanReplies),
-    String(row.meaningfulReplies),
-    String(row.meetings),
     formatUnitCost(row.costPerReady),
+    String(row.sent),
+    String(row.meaningfulReplies),
     formatUnitCost(row.costPerMeaningful),
+    String(row.meetings),
+    formatUnitCost(row.costPerCustomer),
   ]);
 }
-
-const ATTRIBUTION_HEADERS = [
-  "Name",
-  "Spend",
-  "Reviewed",
-  "Ready",
-  "Sent",
-  "Human replies",
-  "Positive/Engaged",
-  "Meetings",
-  "Cost/Ready",
-  "Cost/Meaningful Reply",
-];
 
 export function CostScreen({
   profile,
   cost,
   loading,
-  huntLimit,
   windowName,
   start,
   end,
   huntId,
   onWindow,
-  mailboxReady,
-  replyNote,
-  replyBusy,
-  onCheckReplies,
 }: {
   profile: Profile;
   cost: Cost | null;
   loading: boolean;
-  huntLimit: number;
   windowName: string;
   start: string;
   end: string;
   huntId: string;
   onWindow: (windowName: string, start?: string, end?: string, huntId?: string) => void;
-  mailboxReady: boolean;
-  replyNote: string;
-  replyBusy: boolean;
-  onCheckReplies: () => void;
 }) {
+  const [breakdown, setBreakdown] = useState("source");
+
   if (!cost) {
     return (
       <Stack gap={16}>
         <H2>{profile.name}</H2>
         <Text tone="secondary">{TRACKED_SCOPE}</Text>
-        <Callout tone="neutral" title={loading ? "Loading cost" : "No cost data"}>
-          {loading
-            ? "Reading spend for this profile from the Trace API."
-            : "The Trace API has no cost events for this profile yet."}
-        </Callout>
+        <Text tone="secondary">{loading ? "Reading spend for this profile." : "No cost events for this profile yet."}</Text>
       </Stack>
     );
   }
 
-  const counts = cost.counts;
-  const next = cost.nextHunt;
-  const forecast = forecastLines(next);
-  const trackedStages = cost.stages.filter((stage) => stage.tracked && stage.usd != null);
+  const cacLabel = cost.acquisitionComplete ? "Full CAC" : "Tracked CAC";
+  const rows =
+    breakdown === "signal"
+      ? cost.bySignal
+      : breakdown === "campaign"
+        ? cost.byCampaign
+        : breakdown === "hunt"
+          ? cost.byHuntDetail
+          : cost.bySource;
 
   return (
     <Stack gap={16}>
       <Stack gap={4}>
         <H2>{profile.name}</H2>
-        <Text tone="secondary">{cost.scopeNote || TRACKED_SCOPE}</Text>
         <Text size="small" tone="tertiary">
-          {cost.windowLabel} Outreach-ready is not contact-found. {READY_IS_NOT_CONTACT}
+          {cost.scopeNote || TRACKED_SCOPE}
         </Text>
       </Stack>
 
@@ -147,66 +115,45 @@ export function CostScreen({
           <option value="">All hunts</option>
           {cost.byHunt.map((hunt) => (
             <option key={hunt.huntId} value={hunt.huntId}>
-              {hunt.huntId}
+              {hunt.label || hunt.huntId}
             </option>
           ))}
         </select>
       </Row>
 
+      <Row gap={16} wrap>
+        <Stat value={formatUnitCost(cost.totalUsd)} label="Total tracked spend" tone="info" />
+        <Stat value={formatUnitCost(cost.unitCosts.outreachReady)} label="Cost / outreach-ready" />
+        <Stat value={formatUnitCost(cost.unitCosts.meaningfulReply)} label="Cost / meaningful reply" />
+        <Stat value={formatUnitCost(cost.unitCosts.meeting)} label="Cost / meeting" />
+        <Stat value={formatUnitCost(cost.unitCosts.customer)} label={cacLabel} />
+      </Row>
+
       <Stack gap={8}>
-        <H3>Summary</H3>
-        <Row gap={16} wrap>
-          <Stat value={formatUnitCost(cost.totalUsd)} label="Tracked spend" tone="info" />
-          <Stat value={String(counts.reviewed)} label="Candidates reviewed" />
-          <Stat
-            value={String(counts.outreachReady)}
-            label="Outreach-ready"
-          />
-          <Stat value={String(counts.contactFound)} label="Contacts found" />
-          <Stat value={String(counts.sent)} label="Emails sent" />
-          <Stat value={String(counts.humanReplies)} label="Human replies" />
-          <Stat value={String(counts.meaningfulReplies)} label="Positive/engaged replies" />
-          <Stat value={String(counts.meetings)} label="Meetings" />
-        </Row>
-        <Row gap={16} wrap>
-          <Stat value={formatUnitCost(cost.unitCosts.reviewed)} label="Cost / reviewed" />
-          <Stat value={formatUnitCost(cost.unitCosts.outreachReady)} label="Cost / outreach-ready" />
-          <Stat value={formatUnitCost(cost.unitCosts.sent)} label="Cost / sent" />
-          <Stat value={formatUnitCost(cost.unitCosts.meaningfulReply)} label="Cost / meaningful reply" />
-          <Stat value={formatUnitCost(cost.unitCosts.meeting)} label="Cost / meeting" />
-        </Row>
-        <Text size="small" tone="tertiary">
-          {MEANINGFUL_REPLY} {cost.untrackedEvents > 0
-            ? `${cost.untrackedEvents} cost events have no dollar amount and are excluded from totals.`
-            : ""}
-          {cost.excludedUsd != null ? ` Excluded from total: ${formatUnitCost(cost.excludedUsd)}.` : ""}
-        </Text>
-        <Row gap={8} align="center">
-          <Button
-            variant="secondary"
-            disabled={replyBusy || !mailboxReady}
-            title={mailboxReady ? "Read the connected mailbox and match replies to sends" : "No mailbox is connected"}
-            onClick={onCheckReplies}
-          >
-            {replyBusy ? "Checking mailbox…" : "Check mailbox for replies"}
-          </Button>
-          {replyNote ? <Text size="small" tone="secondary">{replyNote}</Text> : null}
-        </Row>
-        {cost.legacyExcluded && Object.values(cost.legacyExcluded).some((count) => count > 0) ? (
+        <H3>Spend allocation</H3>
+        <Table
+          headers={["Stage", "Spend", "% of total"]}
+          columnAlign={["left", "right", "right"]}
+          rows={[
+            ...cost.stages.map((stage) => [
+              stage.stage,
+              formatStageCost(stage.tracked, stage.usd),
+              formatShare(stage.usd, cost.totalUsd),
+            ]),
+            ["Total", formatUnitCost(cost.totalUsd), cost.totalUsd == null ? "—" : "100%"],
+          ]}
+        />
+        {cost.untrackedEvents > 0 ? (
           <Text size="small" tone="tertiary">
-            Legacy outcomes stay out of this funnel
-            {cost.legacyExcluded.approved ? ` · approved ${cost.legacyExcluded.approved}` : ""}
-            {cost.legacyExcluded.humanReplies ? ` · replies ${cost.legacyExcluded.humanReplies}` : ""}
-            {cost.legacyExcluded.sent ? ` · sent ${cost.legacyExcluded.sent}` : ""}.
-            Strict conversion does not exceed 100%.
+            {cost.untrackedEvents} cost events have no dollar amount.
           </Text>
         ) : null}
       </Stack>
 
       <Stack gap={8}>
-        <H3>Funnel</H3>
+        <H3>Unit economics</H3>
         <Table
-          headers={["Stage", "People", "Conversion", "Tracked cost per outcome"]}
+          headers={["Stage", "People", "Conversion", "Cost per outcome"]}
           columnAlign={["left", "right", "right", "right"]}
           rows={cost.funnel.map((row) => [
             row.stage,
@@ -220,63 +167,28 @@ export function CostScreen({
       </Stack>
 
       <Stack gap={8}>
-        <H3>Spend</H3>
-        {trackedStages.length > 0 ? (
-          <BarChart
-            categories={trackedStages.map((stage) => stage.stage)}
-            series={[{ name: "Tracked spend", data: trackedStages.map((stage) => stage.usd ?? 0), tone: "info" }]}
-            height={140}
-            valuePrefix="$"
-          />
-        ) : null}
+        <Row gap={8} align="center">
+          <Text weight="semibold" style={{ whiteSpace: "nowrap" }}>Break down by</Text>
+          <Select value={breakdown} onChange={setBreakdown} options={BREAKDOWNS} />
+        </Row>
         <Table
-          headers={["Stage", "Spend"]}
-          columnAlign={["left", "right"]}
-          rows={[
-            ...cost.stages.map((stage) => [
-              stage.stage,
-              formatStageCost(stage.tracked, stage.usd),
-            ]),
-            ["Tracked total", formatUnitCost(cost.totalUsd)],
+          headers={[
+            BREAKDOWNS.find((item) => item.value === breakdown)?.label || "Name",
+            "Spend",
+            "Reviewed",
+            "Ready",
+            "Cost / Ready",
+            "Sent",
+            "Meaningful replies",
+            "Cost / Meaningful reply",
+            "Meetings",
+            cacLabel,
           ]}
-        />
-        <Text size="small" tone="tertiary">
-          {cost.hunts} hunts have recorded cost events. {ALLOCATED_DISCOVERY}
-        </Text>
-      </Stack>
-
-      <Stack gap={8}>
-        <H3>Attribution</H3>
-        <Text size="small" tone="tertiary">
-          <Tip label="Source channel" tip={READY_IS_NOT_CONTACT} />. Missing origin stays Unknown.
-        </Text>
-        <Table
-          headers={["Source", ...ATTRIBUTION_HEADERS.slice(1)]}
           columnAlign={["left", "right", "right", "right", "right", "right", "right", "right", "right", "right"]}
-          rows={attributionRows(cost.bySource)}
-          wide
-        />
-        <H3>Signal family</H3>
-        <Table
-          headers={["Signal", ...ATTRIBUTION_HEADERS.slice(1)]}
-          columnAlign={["left", "right", "right", "right", "right", "right", "right", "right", "right", "right"]}
-          rows={attributionRows(cost.bySignal)}
-          wide
-        />
-        <H3>Hunt</H3>
-        <Table
-          headers={["Hunt", ...ATTRIBUTION_HEADERS.slice(1)]}
-          columnAlign={["left", "right", "right", "right", "right", "right", "right", "right", "right", "right"]}
-          rows={attributionRows(cost.byHuntDetail)}
+          rows={attributionRows(rows)}
           wide
         />
       </Stack>
-
-      <Callout tone="info" title={`Next hunt, ${huntLimit} outreach-ready people`}>
-        {forecast.map((line) => (
-          <div key={line}>{line}</div>
-        ))}
-      </Callout>
     </Stack>
   );
 }

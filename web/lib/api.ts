@@ -45,7 +45,8 @@ export type PersonStatus =
   | "sent"
   | "passed"
   | "closed"
-  | "disqualified";
+  | "disqualified"
+  | "unfit";
 
 export type ResearchFact = {
   claim: string;
@@ -140,6 +141,7 @@ export type Person = {
     active_occasion: string;
     next_action: string;
   } | null;
+  unfitReason?: string | null;
   recommendation: string;
   recommendationReason: string;
   linkedinUrl: string;
@@ -236,8 +238,10 @@ export type CostAttribution = {
   humanReplies: number;
   meaningfulReplies: number;
   meetings: number;
+  customers: number;
   costPerReady: number | null;
   costPerMeaningful: number | null;
+  costPerCustomer: number | null;
 };
 
 export type CostForecast = {
@@ -262,6 +266,7 @@ export type CostCounts = {
   humanReplies: number;
   meaningfulReplies: number;
   meetings: number;
+  customers: number;
 };
 
 export type CostTraceLine = {
@@ -285,6 +290,7 @@ export type Cost = {
   windowLabel: string;
   attributionDays: number;
   totalUsd: number | null;
+  acquisitionComplete: boolean;
   untrackedEvents: number;
   excludedUsd: number | null;
   hunts: number;
@@ -304,9 +310,10 @@ export type Cost = {
   };
   byStage: { stage: string; usd: number | null }[];
   stages: CostStage[];
-  byHunt: { huntId: string; usd: number }[];
+  byHunt: { huntId: string; usd: number; label?: string }[];
   bySource: CostAttribution[];
   bySignal: CostAttribution[];
+  byCampaign: CostAttribution[];
   byHuntDetail: CostAttribution[];
   namedReviewed?: number;
   legacyExcluded?: {

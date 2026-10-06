@@ -47,7 +47,7 @@ import {
   timestamp,
 } from "../lib/format";
 
-type RecordFilter = "all" | "researched" | "sent" | "replied";
+type RecordFilter = "all" | "researched" | "unfit" | "sent" | "replied";
 type FoundFilter = "all" | "LinkedIn" | "X" | "Web";
 type SortKey =
   | "added"
@@ -83,7 +83,8 @@ function isHumanReply(person: Person) {
 
 function matchesFilter(person: Person, filter: RecordFilter) {
   if (filter === "sent") return Boolean(person.sentAt) && person.status !== "disqualified";
-  if (filter === "researched") return !person.sentAt;
+  if (filter === "researched") return !person.sentAt && person.status !== "unfit";
+  if (filter === "unfit") return person.status === "unfit";
   if (filter === "replied") return isHumanReply(person);
   return true;
 }
@@ -91,6 +92,7 @@ function matchesFilter(person: Person, filter: RecordFilter) {
 function filterTitle(filter: RecordFilter) {
   if (filter === "sent") return "Sent";
   if (filter === "researched") return "Researched, not sent";
+  if (filter === "unfit") return "Not a fit";
   if (filter === "replied") return "Replied";
   return "In this campaign";
 }
@@ -98,6 +100,7 @@ function filterTitle(filter: RecordFilter) {
 function emptyMessage(filter: RecordFilter) {
   if (filter === "sent") return "No one has been sent from this profile yet.";
   if (filter === "researched") return "No one is waiting on a send decision yet.";
+  if (filter === "unfit") return "No researched person was held back on this profile.";
   if (filter === "replied") return "No human reply has been matched for this profile yet.";
   return "A hunt has not put anyone in this campaign yet.";
 }
@@ -108,7 +111,8 @@ function canMarkSent(person: Person) {
     !person.sentAt &&
     person.status !== "passed" &&
     person.status !== "closed" &&
-    person.status !== "disqualified"
+    person.status !== "disqualified" &&
+    person.status !== "unfit"
   );
 }
 
@@ -836,7 +840,8 @@ export function Records({
   const selected = rows.find((p) => p.id === selectedId) ?? rows[0];
   const sentCount = people.filter((p) => Boolean(p.sentAt)).length;
   const repliedCount = people.filter((p) => isHumanReply(p)).length;
-  const researchedCount = people.filter((p) => !p.sentAt).length;
+  const researchedCount = people.filter((p) => !p.sentAt && p.status !== "unfit").length;
+  const unfitCount = people.filter((p) => p.status === "unfit").length;
   const traceSent = people.filter((p) => p.sentAt && p.sendMethod !== "self").length;
   const selfSent = people.filter((p) => p.sentAt && p.sendMethod === "self").length;
   const showTracking = (filter === "sent" || filter === "replied") && sentCount > 0;
@@ -867,7 +872,7 @@ export function Records({
 
   const visibleRows = clampListSize(listSize, rows.length);
   const withSend = filter !== "sent" && filter !== "replied";
-  const missingContact = rows.filter((p) => !String(p.email || "").trim());
+  const missingContact = rows.filter((p) => p.status !== "unfit" && !String(p.email || "").trim());
   const contactNotFound = people.filter((person) => person.status === "contact_not_found");
   const latestHunt = recentHunts.find((item) => item.status === "done");
   const lookupReady = Boolean(health?.apollo || health?.hunter);
@@ -949,6 +954,12 @@ export function Records({
           value={String(researchedCount)}
           label="Researched, not sent"
           onClick={() => pick("researched")}
+        />
+        <ClickStat
+          active={filter === "unfit"}
+          value={String(unfitCount)}
+          label="Not a fit"
+          onClick={() => pick("unfit")}
         />
         <ClickStat
           active={filter === "sent"}

@@ -4,7 +4,7 @@ import { Callout, H3, Stack, Table, Text } from "./ui";
 import type { AdditionalSignal, Person, ResearchFact, ResearchInference } from "../lib/api";
 import { formatStageCost } from "../lib/economicsView";
 import { axisRows, draftHeld, foundOnLabel, reasonLines, sentenceCase, shortDate, usd } from "../lib/format";
-import { hasStructuredResearch, sourceUrls } from "../lib/researchView";
+import { hasStructuredResearch } from "../lib/researchView";
 
 function ReasonText({
   reason,
@@ -34,20 +34,26 @@ function readSignal(signal: AdditionalSignal) {
   return { source: source || "Web", at: shortDate(at), text, url };
 }
 
-function factLine(fact: ResearchFact): string {
-  const bits = [fact.claim];
-  if (fact.sourceDate) bits.push(fact.sourceDate);
-  if (fact.sourceUrl) bits.push(fact.sourceUrl);
-  return bits.join(" · ");
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "source";
+  }
 }
 
-function inferenceLine(item: ResearchInference): string {
-  const rank = item.confidence ? sentenceCase(item.confidence) : "";
-  return rank ? `${item.claim} [${rank}]` : item.claim;
+function SourceLink({ url }: { url: string }) {
+  const href = url.trim();
+  if (!href) return "—";
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {hostLabel(href)}
+    </a>
+  );
 }
 
-function BulletList({ items, empty }: { items: string[]; empty: string }) {
-  if (items.length === 0) return <Text tone="tertiary">{empty}</Text>;
+function BulletList({ items }: { items: string[] }) {
+  if (items.length === 0) return null;
   return (
     <div className="reason">
       {items.map((item) => (
@@ -57,19 +63,23 @@ function BulletList({ items, empty }: { items: string[]; empty: string }) {
   );
 }
 
-function DecisionSummary({ person }: { person: Person }) {
-  const summary = person.decisionSummary;
-  if (!summary) return null;
+const GAP_LABEL: Record<string, string> = {
+  covered: "Covered",
+  possible_gap: "Possible gap",
+  confirmed_gap: "Confirmed gap",
+  unknown: "Unknown",
+};
+
+function FactTable({ facts }: { facts: ResearchFact[] }) {
+  if (facts.length === 0) return null;
   return (
     <Table
-      headers={["Decision", "Trace's read"]}
-      rows={[
-        ["Decision", summary.decision || "Not reported"],
-        ["Why now", summary.whyNow || "Not reported"],
-        ["Why this person", summary.whyThisPerson || "Not reported"],
-        ["Reply reason", summary.replyReason || "Not reported"],
-        ["Do not claim", summary.doNotClaim || "Not reported"],
-      ]}
+      headers={["Claim", "When", "Source"]}
+      rows={facts.map((fact) => [
+        fact.claim,
+        fact.sourceDate || "—",
+        <SourceLink key={fact.sourceUrl || fact.claim} url={fact.sourceUrl} />,
+      ])}
     />
   );
 }
@@ -77,38 +87,56 @@ function DecisionSummary({ person }: { person: Person }) {
 function ResearchSections({ person }: { person: Person }) {
   const research = person.research;
   if (!research) return null;
-  const sources = sourceUrls(person);
+  const gap = research.gapAssessment;
+  const gapLabel = GAP_LABEL[gap?.status || ""] || "";
+  const decision = person.decisionSummary?.decision || "";
+  const title = [decision, gapLabel].filter(Boolean).join(" · ");
   return (
     <Stack gap={10}>
-      <Stack gap={4}>
-        <H3>Verified facts</H3>
-        <BulletList
-          items={research.verifiedFacts.map(factLine)}
-          empty="None recorded"
-        />
-      </Stack>
-      <Stack gap={4}>
-        <H3>Current workarounds</H3>
-        <BulletList
-          items={research.currentWorkarounds.map(factLine)}
-          empty="None recorded"
-        />
-      </Stack>
-      <Stack gap={4}>
-        <H3>Trace inferences</H3>
-        <BulletList
-          items={research.inferences.map(inferenceLine)}
-          empty="None recorded"
-        />
-      </Stack>
-      <Stack gap={4}>
-        <H3>Unknowns</H3>
-        <BulletList items={research.unknowns} empty="None recorded" />
-      </Stack>
-      <Stack gap={4}>
-        <H3>Sources</H3>
-        <BulletList items={sources} empty="None recorded" />
-      </Stack>
+      {title && (gap?.reason || person.decisionSummary?.replyReason) ? (
+        <Callout tone={gap?.status === "covered" ? "warning" : "info"} title={title}>
+          {gap?.reason || person.decisionSummary?.replyReason}
+        </Callout>
+      ) : null}
+      {person.decisionSummary?.whyThisPerson ? (
+        <Text size="small">{person.decisionSummary.whyThisPerson}</Text>
+      ) : null}
+      {research.verifiedFacts.length > 0 && (
+        <Stack gap={4}>
+          <H3>Verified facts</H3>
+          <FactTable facts={research.verifiedFacts} />
+        </Stack>
+      )}
+      {research.currentWorkarounds.length > 0 && (
+        <Stack gap={4}>
+          <H3>Current workarounds</H3>
+          <FactTable facts={research.currentWorkarounds} />
+        </Stack>
+      )}
+      {research.inferences.length > 0 && (
+        <Stack gap={4}>
+          <H3>Trace inferences</H3>
+          <Table
+            headers={["Read", "Confidence"]}
+            rows={research.inferences.map((item) => [
+              item.claim,
+              item.confidence ? sentenceCase(item.confidence) : "—",
+            ])}
+          />
+        </Stack>
+      )}
+      {research.unknowns.length > 0 && (
+        <Stack gap={4}>
+          <H3>Unknowns</H3>
+          <BulletList items={research.unknowns} />
+        </Stack>
+      )}
+      {research.doNotClaim.length > 0 && (
+        <Stack gap={4}>
+          <H3>Do not claim</H3>
+          <BulletList items={research.doNotClaim} />
+        </Stack>
+      )}
     </Stack>
   );
 }
@@ -127,7 +155,12 @@ export function EvidencePanel({ person }: { person: Person }) {
         <Text size="small" tone="tertiary">
           {foundOnLabel(person)}
           {person.signal.date ? ` · ${shortDate(person.signal.date)}` : ""}
-          {person.signal.url ? ` · ${person.signal.url}` : ""}
+          {person.signal.url ? (
+            <>
+              {" · "}
+              <SourceLink url={person.signal.url} />
+            </>
+          ) : null}
         </Text>
         {person.signal.text ? (
           <div className="quote">
@@ -164,6 +197,13 @@ export function EvidencePanel({ person }: { person: Person }) {
         </Stack>
       )}
 
+      {person.status === "unfit" && (
+        <Callout tone="warning" title="Not a fit for outreach">
+          {person.unfitReason ||
+            "Trace researched this person and held them back. They stay in the file so the cost is not anonymous."}
+        </Callout>
+      )}
+
       {person.status === "contact_not_found" && (
         <Callout tone="warning" title="Contact not found">
           Lookup did not return an email. This person is not sendable. The research stays
@@ -172,12 +212,6 @@ export function EvidencePanel({ person }: { person: Person }) {
       )}
 
       <Stack gap={6}>
-        {(person.decisionSummary || structured) && (
-          <>
-            <H3>Decision</H3>
-            <DecisionSummary person={person} />
-          </>
-        )}
         {structured ? (
           <ResearchSections person={person} />
         ) : recommendation ? (
@@ -212,7 +246,7 @@ export function EvidencePanel({ person }: { person: Person }) {
               : []),
           ]}
         />
-        {draftHeld(person) && (
+        {draftHeld(person) && !structured && (
           <Callout tone="warning" title="Trace will not draft this email">
             {person.replyReason.reason || "No reply reason yet."}
             {person.replyReason.missing_evidence?.length

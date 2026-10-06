@@ -52,6 +52,7 @@ export function statusLabel(status: PersonStatus): string {
   if (status === "passed") return "Passed";
   if (status === "closed") return "Closed";
   if (status === "disqualified") return "Disqualified";
+  if (status === "unfit") return "Not a fit";
   return "Researched, not sent";
 }
 

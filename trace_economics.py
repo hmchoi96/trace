@@ -25,36 +25,57 @@ VARIABLE_CATEGORIES = {
 
 DISCOVERY_STAGES = {"discovery_web", "discovery_x"}
 
+LEGACY_UNALLOCATED = "Legacy unallocated"
+
+# Resolution is the same acquisition step as deepening.
+STAGE_LABELS = {
+    "discovery_web": "Discovery Web",
+    "discovery_x": "Discovery X",
+    "qualification": "Qualification",
+    "deepening": "Deepening",
+    "resolution": "Deepening",
+    "drafting": "Drafting",
+    "contact_lookup": "Contact data",
+    "email_verification": "Email verification",
+    "mailbox": "Mailbox",
+}
+
 STAGE_ORDER = (
-    ("discovery_web", "Discovery Web"),
-    ("discovery_x", "Discovery X"),
-    ("qualification", "Qualification"),
-    ("deepening", "Deepening"),
-    ("resolution", "Resolution"),
-    ("drafting", "Drafting"),
-    ("contact_lookup", "Contact lookup"),
+    "Discovery Web",
+    "Discovery X",
+    "Qualification",
+    "Deepening",
+    "Drafting",
+    "Contact data",
+    "Email verification",
+    "Mailbox",
+    LEGACY_UNALLOCATED,
 )
+
+# Full CAC waits until every variable acquisition category has a price.
+FULL_CAC_CATEGORIES = frozenset({
+    "drafting_api",
+    "contact_data",
+    "email_verification",
+    "mailbox",
+})
 
 HUMAN_QUALITIES = {"positive", "engaged", "neutral", "negative"}
 MEANINGFUL_QUALITIES = {"positive", "engaged"}
 
 SCOPE_NOTE = (
-    "Tracked spend: Grok research only. "
-    "Apollo, drafting, mailbox, and fixed software costs are not included unless separately recorded."
+    "Tracked variable spend only. Contact data, email verification, drafting, "
+    "mailbox, and fixed software are not in this total."
 )
 
 FUNNEL_ROWS = (
     ("reviewed", "Reviewed", None),
     ("outreach_ready", "Outreach-ready", "reviewed"),
-    ("approved", "Approved", "outreach_ready"),
-    ("contact_found", "Contact found", "approved"),
-    ("drafted", "Drafted", "contact_found"),
-    ("sent", "Sent", "sendable"),
+    ("sent", "Sent", "outreach_ready"),
     ("human_reply", "Human reply", "sent"),
-    ("meaningful_reply", "Positive/engaged reply", "sent"),
-    ("meeting", "Meeting", "sent"),
-    ("trial", "Trial", "sent"),
-    ("customer", "Customer", "sent"),
+    ("meaningful_reply", "Positive/Engaged", "human_reply"),
+    ("meeting", "Meeting", "meaningful_reply"),
+    ("customer", "Customer", "meeting"),
 )
 
 
@@ -96,6 +117,151 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def relink_cost_identities(conn, hunt_id: str, events: list[dict[str, Any]]) -> int:
+    """Attach a stored research cost to the person name in its log. Do not bill it twice."""
+    rows = list(conn.execute("SELECT * FROM cost_events WHERE hunt_id = ?", (hunt_id,)).fetchall())
+    used: set[str] = set()
+    updated = 0
+    for event in events:
+        stage = normalize_stage(str(event.get("stage") or ""))
+        if stage in DISCOVERY_STAGES:
+            continue
+        desired = str(event.get("entity_key") or "").strip() or norm_identity(event.get("person_name") or "")
+        if not desired:
+            continue
+        cost = event.get("cost_usd")
+        elapsed = float(event.get("elapsed_sec") or 0)
+        request_id = str(event.get("request_id") or "").strip()
+        match = None
+        if request_id:
+            for row in rows:
+                if row["request_id"] == request_id or row["source_key"] == f"req:{request_id}":
+                    match = row
+                    break
+        if match is None and cost is not None:
+            found = []
+            for row in rows:
+                if row["id"] in used:
+                    continue
+                if normalize_stage(str(row["stage"] or "")) != stage:
+                    continue
+                if row["cost_usd"] is None or abs(float(row["cost_usd"]) - float(cost)) > 0.0001:
+                    continue
+                if abs(float(row["elapsed_sec"] or 0) - elapsed) > 0.2:
+                    continue
+                found.append(row)
+            if len(found) == 1:
+                match = found[0]
+        if match is None or match["id"] in used:
+            continue
+        used.add(match["id"])
+        meta = _loads(match["metadata_json"])
+        if event.get("person_name"):
+            meta["person_name"] = event["person_name"]
+        same = str(match["entity_key"] or "") == desired and match["cost_scope"] == "candidate"
+        if same and meta == _loads(match["metadata_json"]):
+            continue
+        conn.execute(
+            """
+            UPDATE cost_events
+            SET entity_key = ?, cost_scope = 'candidate', allocation_method = 'direct', metadata_json = ?
+            WHERE id = ?
+            """,
+            (desired, _dumps(meta), match["id"]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
+def held_back_people(events: list[dict[str, Any]], existing: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """People a hunt researched and did not save. One row per person, not per call."""
+    known: set[str] = set()
+    companies: list[str] = []
+    for person in existing:
+        for raw in (person.get("name"), person.get("entity_key"), person.get("id")):
+            if raw:
+                known.add(str(raw))
+                known.add(norm_identity(raw))
+        company = norm_identity(person.get("company") or "")
+        if len(company) >= 4:
+            companies.append(company)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for event in events:
+        stage = normalize_stage(str(event.get("stage") or ""))
+        if stage not in {"qualification", "deepening", "resolution"}:
+            continue
+        name = str(event.get("person_name") or "").strip()
+        key = str(event.get("entity_key") or "").strip() or norm_identity(name)
+        if not name or not key or key in seen or norm_identity(name) in known or key in known or norm_identity(key) in known:
+            continue
+        folded = norm_identity(key)
+        if any(company == folded or company in folded or folded in company for company in companies):
+            continue
+        seen.add(key)
+        url = str(event.get("signal_url") or "")
+        host = url.lower()
+        if "linkedin.com" in host:
+            found_on = "LinkedIn"
+        elif "x.com/" in host or "twitter.com/" in host:
+            found_on = "X"
+        else:
+            found_on = "Web"
+        out.append({"name": name, "entity_key": key, "signal_url": url, "found_on": found_on})
+    return out
+
+
+def hunt_labels(hunts: list[dict[str, Any]]) -> dict[str, str]:
+    """Show a hunt by the day it started. A second hunt the same day keeps the time."""
+    parsed: list[tuple[str, datetime | None]] = []
+    day_counts: dict[str, int] = {}
+    clocks: dict[str, set[str]] = {}
+    for hunt in hunts:
+        at = _parse_time(hunt.get("created_at"))
+        parsed.append((str(hunt.get("id") or ""), at))
+        if at is None:
+            continue
+        day = at.strftime("%Y-%m-%d")
+        day_counts[day] = day_counts.get(day, 0) + 1
+        clocks.setdefault(day, set()).add(at.strftime("%H:%M"))
+    this_year = datetime.now(timezone.utc).year
+    labels: dict[str, str] = {}
+    for hunt_id, at in parsed:
+        if not hunt_id:
+            continue
+        if at is None:
+            labels[hunt_id] = hunt_id
+            continue
+        label = f"{at.strftime('%b')} {at.day}"
+        if at.year != this_year:
+            label = f"{label}, {at.year}"
+        day = at.strftime("%Y-%m-%d")
+        if day_counts.get(day, 0) > 1 and len(clocks.get(day, ())) > 1:
+            hour = at.strftime("%I").lstrip("0") or "12"
+            label = f"{label}, {hour}:{at.strftime('%M %p')}"
+        labels[hunt_id] = label
+    return labels
+
+
+def _label_hunt_rows(rows: list[dict[str, Any]], hunts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    labels = hunt_labels(hunts)
+    when = {str(hunt.get("id") or ""): _parse_time(hunt.get("created_at")) for hunt in hunts}
+    dated = []
+    undated = []
+    for row in rows:
+        hunt_id = str(row.get("name") or "")
+        at = when.get(hunt_id)
+        row["name"] = labels.get(hunt_id, hunt_id)
+        if at is None:
+            undated.append(row)
+        else:
+            dated.append((at, row))
+    dated.sort(key=lambda item: item[0], reverse=True)
+    return [row for _, row in dated] + undated
+
+
 def _dumps(value: Any) -> str:
     return json.dumps(value or {}, ensure_ascii=False)
 
@@ -125,6 +291,10 @@ def stage_category(stage: str) -> str:
         return "drafting_api"
     if normalized == "contact_lookup":
         return "contact_data"
+    if normalized == "email_verification":
+        return "email_verification"
+    if normalized == "mailbox":
+        return "mailbox"
     if normalized in {"discovery_web", "discovery_x", "qualification", "deepening", "resolution", "search"}:
         return "research_api"
     return "other_variable"
@@ -201,12 +371,67 @@ def canonical_identities(events: list[dict[str, Any]]) -> dict[str, str]:
     return aliases
 
 
+def norm_identity(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
 def identity_of(event: dict[str, Any], aliases: dict[str, str] | None = None) -> str:
     aliases = aliases or {}
     for raw in (event.get("candidate_id"), event.get("entity_key")):
-        if raw and str(raw) in aliases:
-            return aliases[str(raw)]
+        if not raw:
+            continue
+        text = str(raw)
+        if text in aliases:
+            return aliases[text]
+        folded = norm_identity(text)
+        if folded in aliases:
+            return aliases[folded]
     return person_key(event)
+
+
+def bind_person_cost_keys(
+    aliases: dict[str, str],
+    people: list[dict[str, Any]],
+    costs: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Point a research cost at the one saved person its name or company names."""
+    bound = dict(aliases)
+    companies: dict[str, list[str]] = {}
+    for person in people:
+        canonical = ""
+        for raw in (person.get("id"), person.get("entity_key")):
+            if raw and str(raw) in bound:
+                canonical = bound[str(raw)]
+                break
+        if not canonical:
+            canonical = str(person.get("id") or person.get("entity_key") or "")
+        if not canonical:
+            continue
+        for raw in (person.get("id"), person.get("entity_key"), person.get("name")):
+            if not raw:
+                continue
+            bound.setdefault(str(raw), canonical)
+            bound.setdefault(norm_identity(raw), canonical)
+        company = norm_identity(person.get("company") or "")
+        if len(company) >= 4:
+            bucket = companies.setdefault(company, [])
+            if canonical not in bucket:
+                bucket.append(canonical)
+    unique = {company: ids[0] for company, ids in companies.items() if len(ids) == 1}
+    for cost in costs:
+        exact = str(cost.get("entity_key") or "")
+        raw = norm_identity(exact)
+        if not raw or raw in bound or exact in bound:
+            continue
+        hits = []
+        for company, canonical in unique.items():
+            if company == raw or company in raw or raw in company:
+                hits.append(canonical)
+        hits = list(dict.fromkeys(hits))
+        if len(hits) == 1:
+            bound[exact] = hits[0]
+            bound[raw] = hits[0]
+    return bound
 
 
 def allocate_wave(
@@ -539,21 +764,55 @@ def sync_profile(conn, profile_id: str) -> None:
                 occurred_at=send["sent_at"],
                 source_key=f"email_sent:{send['id']}",
             )
-        quality = str(rec.get("reply_quality") or "").lower()
-        if quality in HUMAN_QUALITIES:
-            record_funnel(
-                conn,
-                profile_id=profile_id,
-                event_type="human_reply",
-                candidate_id=row["id"],
-                entity_key=entity,
-                hunt_id=hunt_id,
-                source_channel=channel,
-                signal_family=family,
-                occurred_at=str(rec.get("first_reply_at") or occurred),
-                metadata={"reply_quality": quality},
-                source_key=f"human_reply:{profile_id}:{identity}",
+        replies = conn.execute(
+            """
+            SELECT id, reply_quality, received_at
+            FROM mailbox_replies
+            WHERE candidate_id = ? AND is_automated = 0 AND reply_quality != ''
+            ORDER BY received_at ASC
+            """,
+            (row["id"],),
+        ).fetchall()
+        if replies:
+            # One event per reply. Cost counts a prospect once if any of them
+            # is Positive or Engaged. Copy learning reads the first reply on the person.
+            conn.execute(
+                "DELETE FROM funnel_events WHERE source_key = ?",
+                (f"human_reply:{profile_id}:{identity}",),
             )
+            for reply in replies:
+                quality = str(reply["reply_quality"] or "").lower()
+                if quality not in HUMAN_QUALITIES:
+                    continue
+                record_funnel(
+                    conn,
+                    profile_id=profile_id,
+                    event_type="human_reply",
+                    candidate_id=row["id"],
+                    entity_key=entity,
+                    hunt_id=hunt_id,
+                    source_channel=channel,
+                    signal_family=family,
+                    occurred_at=str(reply["received_at"] or occurred),
+                    metadata={"reply_quality": quality},
+                    source_key=f"human_reply:{reply['id']}",
+                )
+        else:
+            quality = str(rec.get("reply_quality") or "").lower()
+            if quality in HUMAN_QUALITIES:
+                record_funnel(
+                    conn,
+                    profile_id=profile_id,
+                    event_type="human_reply",
+                    candidate_id=row["id"],
+                    entity_key=entity,
+                    hunt_id=hunt_id,
+                    source_channel=channel,
+                    signal_family=family,
+                    occurred_at=str(rec.get("first_reply_at") or occurred),
+                    metadata={"reply_quality": quality},
+                    source_key=f"human_reply:{profile_id}:{identity}",
+                )
     conn.commit()
 
 
@@ -631,11 +890,14 @@ def import_research_events(
     for index, event in enumerate(events):
         key = research_source_key(event, index)
         stage = normalize_stage(str(event.get("stage") or ""))
-        entity = str(event.get("entity_key") or "")
+        entity = str(event.get("entity_key") or "").strip() or norm_identity(event.get("person_name") or "")
         cost = event.get("cost_usd")
         cost_value = None if cost is None or cost == "" else float(cost)
         scope = _cost_scope(stage, entity)
-        metadata = {"wave_id": str(event.get("wave_id") or "")}
+        metadata = {
+            "wave_id": str(event.get("wave_id") or ""),
+            "person_name": str(event.get("person_name") or ""),
+        }
         payload = (
             profile_id,
             hunt_id,
@@ -799,11 +1061,11 @@ def _quality(event: dict[str, Any]) -> str:
 
 
 def funnel_counts(events: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, int]]:
-    """Strict funnel counts, plus outcomes that skipped an earlier stage.
+    """Unique people at each acquisition outcome.
 
-    A later stage only counts people who also passed every stage before it.
-    Conversion therefore cannot exceed 100%. The skipped outcomes stay in
-    legacyExcluded and are not deleted.
+    A prospect with several Positive replies counts once. Operational states
+    (approved, contact, drafted, trial) stay in the dict for callers that still
+    read them, and are not part of the economics funnel.
     """
     aliases = canonical_identities(events)
 
@@ -820,26 +1082,17 @@ def funnel_counts(events: list[dict[str, Any]]) -> tuple[dict[str, int], dict[st
         return found
 
     reviewed = ids({"candidate_reviewed"})
-    raw_ready = ids({"outreach_ready"})
-    raw_approved = ids({"human_approved"})
-    raw_contact = ids({"contact_found"})
-    raw_drafted = ids({"draft_generated"})
-    raw_sendable = ids({"sendable"})
-    raw_sent = ids({"email_sent"})
-    raw_human = ids({"human_reply"}, quality=HUMAN_QUALITIES)
-    raw_meaningful = ids({"human_reply"}, quality=MEANINGFUL_QUALITIES)
-    raw_meeting = ids({"meeting_booked"})
-    ready = reviewed & raw_ready
-    approved = ready & raw_approved
-    contact = approved & raw_contact
-    drafted = contact & raw_drafted
-    sendable = drafted & raw_sendable
-    sent = sendable & raw_sent
-    human = sent & raw_human
-    meaningful = sent & raw_meaningful
-    meeting = sent & raw_meeting
-    trial = sent & ids({"trial_started"})
-    customer = sent & ids({"customer_won"})
+    ready = ids({"outreach_ready"})
+    approved = ids({"human_approved"})
+    contact = ids({"contact_found"})
+    drafted = ids({"draft_generated"})
+    sendable = ids({"sendable"})
+    sent = ids({"email_sent"})
+    human = ids({"human_reply"}, quality=HUMAN_QUALITIES)
+    meaningful = ids({"human_reply"}, quality=MEANINGFUL_QUALITIES)
+    meeting = ids({"meeting_booked"})
+    trial = ids({"trial_started"})
+    customer = ids({"customer_won"})
     counts = {
         "reviewed": len(reviewed),
         "outreach_ready": len(ready),
@@ -855,14 +1108,14 @@ def funnel_counts(events: list[dict[str, Any]]) -> tuple[dict[str, int], dict[st
         "customer": len(customer),
     }
     legacy = {
-        "outreachReady": len(raw_ready - ready),
-        "approved": len(raw_approved - approved),
-        "contactFound": len(raw_contact - contact),
-        "drafted": len(raw_drafted - drafted),
-        "sent": len(raw_sent - sent),
-        "humanReplies": len(raw_human - human),
-        "meaningfulReplies": len(raw_meaningful - meaningful),
-        "meetings": len(raw_meeting - meeting),
+        "outreachReady": len(ready - reviewed),
+        "approved": len(approved - reviewed),
+        "contactFound": len(contact - reviewed),
+        "drafted": len(drafted - reviewed),
+        "sent": len(sent - reviewed),
+        "humanReplies": len(human - reviewed),
+        "meaningfulReplies": len(meaningful - reviewed),
+        "meetings": len(meeting - reviewed),
     }
     return counts, legacy
 
@@ -929,20 +1182,18 @@ def _tracked_spend(costs: list[dict[str, Any]]) -> float | None:
 
 def _stage_rollup(costs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[str, dict[str, Any]] = {}
-    labels = dict(STAGE_ORDER)
     for row in costs:
         if row.get("allocation_method") == "equal_split" and row.get("cost_scope") == "candidate":
             continue
         stage = normalize_stage(str(row.get("stage") or ""))
-        label = labels.get(stage, "Other")
+        label = STAGE_LABELS.get(stage, LEGACY_UNALLOCATED)
         bucket = buckets.setdefault(label, {"tracked": 0.0, "priced": 0, "calls": 0})
         bucket["calls"] += 1
         if row.get("cost_usd") is not None and counts_toward_total(row):
             bucket["tracked"] += float(row["cost_usd"])
             bucket["priced"] += 1
-    order = [label for _, label in STAGE_ORDER] + ["Other"]
     out = []
-    for label in order:
+    for label in STAGE_ORDER:
         bucket = buckets.get(label)
         if not bucket:
             continue
@@ -969,8 +1220,12 @@ def _source_of(
     return channel or "Unknown", family or "Unknown"
 
 
-def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    aliases = canonical_identities(funnel)
+def _attribute(
+    costs: list[dict[str, Any]],
+    funnel: list[dict[str, Any]],
+    aliases: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    aliases = aliases or canonical_identities(funnel)
     people: dict[str, dict[str, str]] = {}
     for event in funnel:
         if event.get("event_type") != "candidate_reviewed":
@@ -1014,6 +1269,7 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
         "outreach_ready": "ready",
         "email_sent": "sent",
         "meeting_booked": "meeting",
+        "customer_won": "customer",
     }
     for event in funnel:
         stage = outcome_stage.get(str(event.get("event_type")))
@@ -1042,13 +1298,12 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
         amount = float(cost["cost_usd"])
         if cost.get("cost_scope") == "wave" and cost.get("allocation_method") == "equal_split":
             continue
+        hunt = cost.get("hunt_id") or LEGACY_UNALLOCATED
         if cost.get("cost_scope") == "candidate" and cost.get("allocation_method") == "direct":
             channel, family = _source_of(cost, people, aliases)
-            hunt = cost.get("hunt_id") or "Unknown"
-        elif cost.get("cost_scope") == "wave":
-            channel, family, hunt = "Unknown", "Unknown", cost.get("hunt_id") or "Unknown"
         else:
-            channel, family, hunt = "Unknown", "Unknown", cost.get("hunt_id") or "Unknown"
+            # Unallocated wave and hunt-level spend stays off named candidates.
+            channel, family = LEGACY_UNALLOCATED, LEGACY_UNALLOCATED
         bump(sources, channel, amount, "", "spend")
         bump(families, family, amount, "", "spend")
         bump(hunts, hunt, amount, "", "spend")
@@ -1075,9 +1330,9 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
         remainder = float(cost["cost_usd"]) - allocated_by_parent.get(str(cost.get("id") or ""), 0.0)
         if remainder <= 1e-9:
             continue
-        hunt = cost.get("hunt_id") or "Unknown"
-        bump(sources, "Unknown", remainder, "", "spend")
-        bump(families, "Unknown", remainder, "", "spend")
+        hunt = cost.get("hunt_id") or LEGACY_UNALLOCATED
+        bump(sources, LEGACY_UNALLOCATED, remainder, "", "spend")
+        bump(families, LEGACY_UNALLOCATED, remainder, "", "spend")
         bump(hunts, hunt, remainder, "", "spend")
 
     def finish(table: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1090,6 +1345,7 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
             human_n = len(stages.get("human", set()))
             meaningful_n = len(stages.get("meaningful", set()))
             meeting_n = len(stages.get("meeting", set()))
+            customer_n = len(stages.get("customer", set()))
             spend = row["spend"] if row["priced"] else None
             rows.append(
                 {
@@ -1101,8 +1357,10 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
                     "humanReplies": human_n,
                     "meaningfulReplies": meaningful_n,
                     "meetings": meeting_n,
+                    "customers": customer_n,
                     "costPerReady": unit_cost(spend, ready_n),
                     "costPerMeaningful": unit_cost(spend, meaningful_n),
+                    "costPerCustomer": unit_cost(spend, customer_n),
                 }
             )
         return rows
@@ -1138,7 +1396,14 @@ def campaign_report(
     funnel = [_decorate(row) for row in _rows(conn, "SELECT * FROM funnel_events WHERE profile_id = ?", (profile_id,))]
     start_at, end_at = _window_bounds(window, start, end)
     filtered = window != "all" or bool(hunt_id)
-    aliases = canonical_identities(funnel)
+    people_rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, name, company, entity_key FROM candidates WHERE profile_id = ?",
+            (profile_id,),
+        )
+    ]
+    aliases = bind_person_cost_keys(canonical_identities(funnel), people_rows, costs)
     if filtered:
         funnel = _in_cohort(
             funnel,
@@ -1189,7 +1454,16 @@ def campaign_report(
         if row.get("cost_usd") is not None and str(row.get("category") or "") not in VARIABLE_CATEGORIES
     ]
     stages = _stage_rollup(costs)
-    by_source, by_signal, by_hunt = _attribute(costs, funnel)
+    by_source, by_signal, by_hunt = _attribute(costs, funnel, aliases)
+    hunt_rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, created_at FROM hunts WHERE profile_id = ?",
+            (profile_id,),
+        )
+    ]
+    by_hunt = _label_hunt_rows(by_hunt, hunt_rows)
+    hunt_name = hunt_labels(hunt_rows)
     attributed = sum(row["reviewed"] for row in by_source)
     if counts["reviewed"] > attributed:
         unknown = next((row for row in by_source if row["name"] == "Unknown"), None)
@@ -1203,8 +1477,10 @@ def campaign_report(
                 "humanReplies": 0,
                 "meaningfulReplies": 0,
                 "meetings": 0,
+                "customers": 0,
                 "costPerReady": None,
                 "costPerMeaningful": None,
+                "costPerCustomer": None,
             }
             by_source.append(unknown)
         unknown["reviewed"] += counts["reviewed"] - attributed
@@ -1233,6 +1509,32 @@ def campaign_report(
         "trial": unit_cost(spend, counts["trial"]),
         "customer": unit_cost(spend, counts["customer"]),
     }
+    priced_categories = {
+        str(row.get("category") or "")
+        for row in costs
+        if counts_toward_total(row)
+    }
+    acquisition_complete = FULL_CAC_CATEGORIES <= priced_categories
+    profile_row = conn.execute(
+        "SELECT name FROM profiles WHERE id = ?",
+        (profile_id,),
+    ).fetchone()
+    by_campaign = [
+        {
+            "name": profile_row["name"] if profile_row else profile_id,
+            "spend": spend,
+            "reviewed": counts["reviewed"],
+            "ready": counts["outreach_ready"],
+            "sent": counts["sent"],
+            "humanReplies": counts["human_reply"],
+            "meaningfulReplies": counts["meaningful_reply"],
+            "meetings": counts["meeting"],
+            "customers": counts["customer"],
+            "costPerReady": unit["outreachReady"],
+            "costPerMeaningful": unit["meaningfulReply"],
+            "costPerCustomer": unit["customer"],
+        }
+    ]
     if window == "all" and not hunt_id:
         window_label = "All time. Outcomes are the campaign lifetime."
     else:
@@ -1266,14 +1568,20 @@ def campaign_report(
             "humanReplies": counts["human_reply"],
             "meaningfulReplies": counts["meaningful_reply"],
             "meetings": counts["meeting"],
+            "customers": counts["customer"],
         },
         "funnel": funnel_rows,
         "unitCosts": unit,
         "byStage": [{"stage": row["stage"], "usd": row["usd"]} for row in stages if row["usd"] is not None],
         "stages": stages,
-        "byHunt": [{"huntId": key, "usd": value} for key, value in hunt_totals.items()],
+        "byHunt": [
+            {"huntId": key, "usd": value, "label": hunt_name.get(key) or key}
+            for key, value in hunt_totals.items()
+        ],
+        "acquisitionComplete": acquisition_complete,
         "bySource": by_source,
         "bySignal": by_signal,
+        "byCampaign": by_campaign,
         "byHuntDetail": by_hunt,
         "namedReviewed": named_reviewed,
         "legacyExcluded": legacy,

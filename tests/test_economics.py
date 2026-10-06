@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -453,17 +454,113 @@ def test_early_entity_key_stays_on_the_same_person(conn):
     assert unknown is None or (unknown["spend"] or 0) == pytest.approx(0)
 
 
-def test_legacy_approval_does_not_push_conversion_over_100(conn):
+def test_operational_states_stay_out_of_the_economics_funnel(conn):
     record_funnel(conn, profile_id="oneaway", event_type="candidate_reviewed", candidate_id="ready_person", entity_key="ready")
     record_funnel(conn, profile_id="oneaway", event_type="outreach_ready", candidate_id="ready_person", entity_key="ready")
     record_funnel(conn, profile_id="oneaway", event_type="human_approved", candidate_id="ready_person", entity_key="ready")
     record_funnel(conn, profile_id="oneaway", event_type="human_approved", candidate_id="old_person", entity_key="old")
     report = campaign_report(conn, "oneaway")
-    approved = next(row for row in report["funnel"] if row["key"] == "approved")
-    assert approved["people"] == 1
+    assert [row["key"] for row in report["funnel"]] == [
+        "reviewed",
+        "outreach_ready",
+        "sent",
+        "human_reply",
+        "meaningful_reply",
+        "meeting",
+        "customer",
+    ]
+    ready = next(row for row in report["funnel"] if row["key"] == "outreach_ready")
+    assert ready["people"] == 1
+    assert ready["conversion"]["rate"] == 1
+    assert report["counts"]["outreachReady"] == 1
     assert report["legacyExcluded"]["approved"] == 1
-    assert approved["conversion"]["rate"] == 1
-    assert approved["conversion"]["rate"] <= 1
+
+
+def test_hunt_table_uses_the_start_date(conn):
+    _hunt(conn, "hunt_old")
+    _hunt(conn, "hunt_new")
+    conn.execute(
+        "UPDATE hunts SET created_at = ? WHERE id = ?",
+        ("2026-10-04T02:17:00+00:00", "hunt_old"),
+    )
+    conn.execute(
+        "UPDATE hunts SET created_at = ? WHERE id = ?",
+        ("2026-10-05T21:34:00+00:00", "hunt_new"),
+    )
+    conn.commit()
+    import_research_events(
+        conn,
+        [{"stage": "qualification", "entity_key": "ada", "cost_usd": 0.4, "request_id": "q-old"}],
+        profile_id="oneaway",
+        hunt_id="hunt_old",
+    )
+    import_research_events(
+        conn,
+        [{"stage": "qualification", "entity_key": "bea", "cost_usd": 0.6, "request_id": "q-new"}],
+        profile_id="oneaway",
+        hunt_id="hunt_new",
+    )
+    report = campaign_report(conn, "oneaway")
+    names = [row["name"] for row in report["byHuntDetail"]]
+    assert names[0].startswith("Oct 5")
+    assert names[1].startswith("Oct 4")
+    assert all(not name.startswith("hunt_") for name in names)
+    labels = {row["huntId"]: row["label"] for row in report["byHunt"]}
+    assert labels["hunt_new"].startswith("Oct 5")
+    assert labels["hunt_old"].startswith("Oct 4")
+
+
+def test_company_cost_and_held_back_people_stay_out_of_unknown(conn):
+    from trace_economics import held_back_people, relink_cost_identities
+
+    _hunt(conn, "h1")
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="candidate_reviewed",
+        candidate_id="cand_zach",
+        entity_key="zach bruggeman|ramp",
+        source_channel="Web",
+        signal_family="behavior_trigger",
+        hunt_id="h1",
+    )
+    conn.execute(
+        """
+        INSERT INTO candidates (
+            id, hunt_id, profile_id, name, title, company, found_on, entity_key,
+            candidate_json, created_at
+        ) VALUES ('cand_zach', 'h1', 'oneaway', 'Zach Bruggeman', '', 'Ramp', 'Web',
+                  'zach bruggeman|ramp', '{}', '2026-10-05T00:00:00+00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO cost_events (
+            id, profile_id, hunt_id, stage, cost_usd, elapsed_sec, created_at,
+            source_key, cost_scope, allocation_method, category
+        ) VALUES ('cost_ramp', 'oneaway', 'h1', 'qualification', 0.18, 40.0,
+                  '2026-10-05T00:00:00+00:00', 'cost_ramp', 'hunt', 'direct', 'research_api')
+        """
+    )
+    conn.commit()
+    relink_cost_identities(
+        conn,
+        "h1",
+        [{"stage": "qualification", "person_name": "Ramp", "entity_key": "ramp", "cost_usd": 0.18, "elapsed_sec": 40.0}],
+    )
+    held = held_back_people(
+        [
+            {"stage": "qualification", "person_name": "Ramp", "entity_key": "ramp", "signal_url": "https://example.com"},
+            {"stage": "qualification", "person_name": "Uber Engineering", "entity_key": "uber engineering", "signal_url": "https://x.com/UberEng/status/1"},
+        ],
+        [{"id": "cand_zach", "name": "Zach Bruggeman", "company": "Ramp", "entity_key": "zach bruggeman|ramp"}],
+    )
+    assert [item["name"] for item in held] == ["Uber Engineering"]
+    report = campaign_report(conn, "oneaway")
+    unknown = sum(row["spend"] or 0 for row in report["bySource"] if row["name"] == "Unknown")
+    web = next(row for row in report["bySource"] if row["name"] == "Web")
+    assert unknown == pytest.approx(0)
+    assert web["spend"] == pytest.approx(0.18)
 
 
 def test_signal_family_reuses_the_reply_reason_trigger():
@@ -472,6 +569,131 @@ def test_signal_family_reuses_the_reply_reason_trigger():
     assert signal_family_for({"reply_reason": {"trigger_type": "behavior_trigger"}}) == "behavior_trigger"
     assert signal_family_for({"signal_family": "action_trigger"}) == "action_trigger"
     assert signal_family_for({}) == "unknown"
+
+
+def test_tracked_spend_allocates_by_stage_and_prices_each_outcome(conn):
+    """$10.32 research ledger: stage mix, unit costs, and unallocated discovery."""
+    _hunt(conn, "h1", reviewed_n=11)
+    people = [
+        {
+            "entity_key": f"p{i}",
+            "source_channel": "web",
+            "signal_family": "action",
+            "kind": "ready" if i < 4 else "reject",
+            "wave_id": "wave-web",
+        }
+        for i in range(11)
+    ]
+    record_review_batch(conn, "oneaway", "h1", people)
+    import_research_events(
+        conn,
+        [
+            {"stage": "discovery_web", "cost_usd": 2.52, "request_id": "web", "wave_id": "wave-web"},
+            {"stage": "discovery_x", "cost_usd": 2.16, "request_id": "x", "wave_id": "wave-x"},
+            {"stage": "qualification", "entity_key": "p0", "cost_usd": 2.54, "request_id": "qual"},
+            {"stage": "deepening", "entity_key": "p0", "cost_usd": 2.00, "request_id": "deep"},
+            {"stage": "resolution", "entity_key": "p0", "cost_usd": 1.10, "request_id": "resolve"},
+        ],
+        profile_id="oneaway",
+        hunt_id="h1",
+    )
+    report = campaign_report(conn, "oneaway")
+    assert report["totalUsd"] == pytest.approx(10.32)
+    assert report["acquisitionComplete"] is False
+    stages = {row["stage"]: row["usd"] for row in report["stages"] if row["tracked"]}
+    assert stages["Discovery Web"] == pytest.approx(2.52)
+    assert stages["Discovery X"] == pytest.approx(2.16)
+    assert stages["Qualification"] == pytest.approx(2.54)
+    assert stages["Deepening"] == pytest.approx(3.10)
+    assert sum(stages.values()) == pytest.approx(report["totalUsd"])
+    assert round(report["unitCosts"]["reviewed"], 2) == 0.94
+    assert report["unitCosts"]["outreachReady"] == pytest.approx(2.58)
+    assert report["counts"]["reviewed"] == 11
+    assert report["counts"]["outreachReady"] == 4
+    assert report["unitCosts"]["humanReply"] is None
+    assert report["unitCosts"]["meaningfulReply"] is None
+    assert report["unitCosts"]["customer"] is None
+    assert report["counts"]["customers"] == 0
+    for key in ("bySource", "bySignal", "byCampaign", "byHuntDetail"):
+        assert sum(row["spend"] or 0 for row in report[key]) == pytest.approx(report["totalUsd"])
+    legacy = next(row for row in report["bySource"] if row["name"] == "Legacy unallocated")
+    assert legacy["spend"] == pytest.approx(2.16)
+    assert legacy["ready"] == 0
+    assert legacy["reviewed"] == 0
+    assert conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM cost_events
+        WHERE stage = 'discovery_x' AND allocation_method = 'equal_split'
+        """
+    ).fetchone()["n"] == 0
+    web = next(row for row in report["bySource"] if row["name"] == "Web")
+    assert web["spend"] == pytest.approx(8.16)
+
+
+def test_repeated_positive_replies_count_as_one_prospect(conn):
+    now = datetime.now(timezone.utc)
+    origin = (now - timedelta(days=5)).isoformat()
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="candidate_reviewed",
+        candidate_id="cand_1",
+        entity_key="ada",
+        occurred_at=origin,
+    )
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="human_reply",
+        candidate_id="cand_1",
+        entity_key="ada",
+        occurred_at=(now - timedelta(days=4)).isoformat(),
+        metadata={"reply_quality": "positive"},
+        source_key="human_reply:ada:1",
+    )
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="human_reply",
+        candidate_id="cand_1",
+        entity_key="ada",
+        occurred_at=(now - timedelta(days=3)).isoformat(),
+        metadata={"reply_quality": "positive"},
+        source_key="human_reply:ada:2",
+    )
+    late = (now - timedelta(days=2)).isoformat()
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="candidate_reviewed",
+        candidate_id="cand_2",
+        entity_key="bea",
+        occurred_at=late,
+    )
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="human_reply",
+        candidate_id="cand_2",
+        entity_key="bea",
+        occurred_at=(now + timedelta(days=40)).isoformat(),
+        metadata={"reply_quality": "engaged"},
+        source_key="human_reply:bea:late",
+    )
+    import_research_events(
+        conn,
+        [{"stage": "qualification", "entity_key": "ada", "cost_usd": 4.0, "request_id": "q-ada"}],
+        profile_id="oneaway",
+        hunt_id="h1",
+    )
+    everywhere = campaign_report(conn, "oneaway")
+    assert everywhere["counts"]["meaningfulReplies"] == 2
+    windowed = campaign_report(conn, "oneaway", window="30d")
+    assert windowed["counts"]["meaningfulReplies"] == 1
+    assert windowed["unitCosts"]["meaningfulReply"] == pytest.approx(4.0)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM funnel_events WHERE event_type = 'human_reply' AND candidate_id = 'cand_1'"
+    ).fetchone()["n"] == 2
 
 
 def test_economics_module_has_no_product_name_branch():

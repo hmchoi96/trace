@@ -1,26 +1,28 @@
 import assert from "node:assert/strict";
 
 import {
-  ALLOCATED_DISCOVERY,
-  MEANINGFUL_REPLY,
-  READY_IS_NOT_CONTACT,
   TRACKED_SCOPE,
   forecastLines,
   formatRatio,
+  formatShare,
   formatStageCost,
   formatUnitCost,
 } from "./economicsView.ts";
 
-assert.equal(formatUnitCost(null), "N/A");
+assert.equal(formatUnitCost(null), "—");
 assert.equal(formatUnitCost(1.5), "$1.50");
 assert.equal(formatStageCost(false, null), "Not tracked");
 assert.equal(formatStageCost(true, 0), "$0.00");
-assert.equal(formatRatio(3, 0, null), "N/A");
+assert.equal(formatShare(null, 10.32), "—");
+assert.equal(formatShare(2.52, 10.32), "24.4%");
+assert.equal(formatShare(2.16, 10.32), "20.9%");
+assert.equal(formatShare(2.54, 10.32), "24.6%");
+assert.equal(formatShare(3.1, 10.32), "30.0%");
+assert.equal(formatShare(2.162224, 10.320288), "20.9%");
+assert.equal(formatRatio(3, 0, null), "—");
 assert.equal(formatRatio(3, 12, 0.25), "3 / 12 · 25%");
-assert.match(TRACKED_SCOPE, /Grok research only/);
-assert.match(READY_IS_NOT_CONTACT, /does not mean a contact was found/);
-assert.match(MEANINGFUL_REPLY, /Positive or Engaged/);
-assert.match(ALLOCATED_DISCOVERY, /split evenly/);
+assert.match(TRACKED_SCOPE, /Tracked variable spend only/);
+assert.match(TRACKED_SCOPE, /not in this total/);
 
 const cold = forecastLines({
   enoughHistory: false,

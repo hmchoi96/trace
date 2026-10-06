@@ -5,18 +5,10 @@ function dollars(value: number): string {
 }
 
 export const TRACKED_SCOPE =
-  "Tracked spend: Grok research only. Apollo, drafting, mailbox, and fixed software costs are not included unless separately recorded.";
-
-export const READY_IS_NOT_CONTACT =
-  "Outreach-ready means the person meets the outreach bar. It does not mean a contact was found.";
-
-export const MEANINGFUL_REPLY = "A meaningful reply is Positive or Engaged. It is not a meeting.";
-
-export const ALLOCATED_DISCOVERY =
-  "Discovery cost is split evenly across the fresh candidates that wave actually reviewed.";
+  "Tracked variable spend only. Contact data, email verification, drafting, mailbox, and fixed software are not in this total.";
 
 export function formatUnitCost(value: number | null | undefined): string {
-  if (value == null) return "N/A";
+  if (value == null) return "—";
   return dollars(value);
 }
 
@@ -25,12 +17,20 @@ export function formatStageCost(tracked: boolean, value: number | null | undefin
   return dollars(value);
 }
 
+export function formatShare(value: number | null | undefined, total: number | null | undefined): string {
+  if (value == null || total == null || total <= 0) return "—";
+  const part = Math.round(value * 100) / 100;
+  const whole = Math.round(total * 100) / 100;
+  if (whole <= 0) return "—";
+  return `${((part / whole) * 100).toFixed(1)}%`;
+}
+
 export function formatRatio(
   num: number,
   den: number | null | undefined,
   rate: number | null | undefined,
 ): string {
-  if (den == null || rate == null) return "N/A";
+  if (den == null || den <= 0 || rate == null) return "—";
   return `${num} / ${den} · ${Math.round(rate * 100)}%`;
 }
 

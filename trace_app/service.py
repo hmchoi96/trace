@@ -273,6 +273,7 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
         set_job_progress(conn, job_id, STAGE_LABELS["saving"])
 
     added = _store_candidates(conn, hunt_id, profile_id, candidates)
+    held_back = _store_candidates(conn, hunt_id, profile_id, list(slot_stats.get("unfit_people") or []))
     dedupe_candidates(conn, profile_id)
     _import_cost_events(conn, profile_id, hunt_id, cost_path)
     from trace_economics import record_review_batch, refresh_wave_allocations
@@ -285,6 +286,8 @@ def run_hunt(conn, hunt_id: str, researcher: Callable[..., Any] | None = None) -
         done_msg = f"Reviewed {reviewed} candidates. {added} of {target} meet the outreach bar."
     else:
         done_msg = f"Found {added} new people"
+    if held_back:
+        done_msg = f"{done_msg}. Held back {held_back} who were researched and are not a fit."
     append_hunt_event(conn, hunt_id, "done", done_msg)
     conn.execute(
         """
@@ -1492,12 +1495,14 @@ def sync_mailbox_replies(
         if not cand:
             continue
         latest = replies[-1]
+        first = replies[0]
         rec = db.loads(cand["candidate_json"], {})
         rec.pop("reply_preview", None)
         rec.pop("reply_subject", None)
-        rec["reply_quality"] = latest["reply_quality"]
+        # Copy learning uses the first human reply. Cost counts any later Positive or Engaged reply separately.
+        rec["reply_quality"] = first["reply_quality"]
         rec["reply_status"] = "replied"
-        rec["first_reply_at"] = replies[0]["received_at"]
+        rec["first_reply_at"] = first["received_at"]
         rec["last_reply_at"] = latest["received_at"]
         rec["matched_by"] = "mailbox"
         conn.execute(
@@ -1720,6 +1725,7 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "replyReason": reply,
         "decisionSummary": summary,
         "research": research_dto(rec),
+        "unfitReason": str(rec.get("unfit_reason") or "") or None,
         "recommendation": rec.get("recommendation") or "",
         "recommendationReason": rec.get("recommendation_reason") or "",
         "linkedinUrl": rec.get("linkedin_url") or "",
@@ -1855,6 +1861,9 @@ def _status_of(row: dict[str, Any], draft: dict[str, Any] | None, send: Any) -> 
         if not str(row.get("email") or "").strip() and row.get("enrich_state") == "attempted":
             return "contact_not_found"
         return "approved"
+    rec = db.loads(row.get("candidate_json"), {})
+    if rec.get("trace_fit") == "unfit":
+        return "unfit"
     return "researched"
 
 
@@ -1940,7 +1949,78 @@ def _enqueue_prepare_if_needed(conn, candidate_id: str) -> bool:
     return True
 
 
+def restore_held_back(conn, profile_id: str) -> int:
+    """Keep people a finished hunt researched and did not save, and attach their cost."""
+    import hashlib
+
+    from signal_discovery import load_research_costs
+    from trace_economics import held_back_people, relink_cost_identities
+
+    inserted = 0
+    hunts = conn.execute("SELECT id FROM hunts WHERE profile_id = ?", (profile_id,)).fetchall()
+    for hunt in hunts:
+        path = _runs_path(f"cost_{hunt['id']}.jsonl")
+        if not os.path.isfile(path):
+            return_events = []
+        else:
+            return_events = load_research_costs(path)
+        if not return_events:
+            continue
+        relink_cost_identities(conn, hunt["id"], return_events)
+        existing = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, name, company, entity_key FROM candidates WHERE profile_id = ?",
+                (profile_id,),
+            )
+        ]
+        for person in held_back_people(return_events, existing):
+            key = person["entity_key"]
+            cid = "unfit_" + hashlib.sha256(f"{hunt['id']}:{key}".encode()).hexdigest()[:12]
+            if conn.execute("SELECT 1 FROM candidates WHERE id = ?", (cid,)).fetchone():
+                continue
+            reason = (
+                "Reviewed during this hunt and held back. "
+                "The written reason was not stored with the run."
+            )
+            rec = {
+                "candidate_id": cid,
+                "name": person["name"],
+                "entity_key": key,
+                "signal_url": person["signal_url"],
+                "signal_source": {"X": "x", "LinkedIn": "linkedin"}.get(person["found_on"], "web"),
+                "trace_fit": "unfit",
+                "unfit_reason": reason,
+                "why_relevant": reason,
+                "signal_family": "unknown",
+            }
+            conn.execute(
+                """
+                INSERT INTO candidates (
+                    id, hunt_id, profile_id, name, title, company,
+                    found_on, entity_key, candidate_json, created_at
+                ) VALUES (?, ?, ?, ?, '', '', ?, ?, ?, ?)
+                """,
+                (
+                    cid,
+                    hunt["id"],
+                    profile_id,
+                    person["name"],
+                    person["found_on"],
+                    key,
+                    db.dumps(rec),
+                    now_iso(),
+                ),
+            )
+            existing.append({"id": cid, "name": person["name"], "company": "", "entity_key": key})
+            inserted += 1
+    if inserted:
+        conn.commit()
+    return inserted
+
+
 def people(conn, profile_id: str) -> list[dict[str, Any]]:
+    restore_held_back(conn, profile_id)
     sync_stored_contacts(conn, profile_id)
     ensure_prepare_jobs(conn, profile_id)
     rows = conn.execute(
@@ -1968,6 +2048,7 @@ def cost_summary(
 ) -> dict[str, Any]:
     from trace_economics import campaign_report
 
+    restore_held_back(conn, profile_id)
     return campaign_report(
         conn,
         profile_id,
