@@ -666,7 +666,7 @@ function RecordDetail({
                 <H3>Tracking</H3>
                 <Callout tone="warning" title="Opens and clicks are not tracked">
                   Trace records that mail went out. It does not read delivery, opens, or
-                  clicks, and replies are not wired up yet.
+                  clicks. A human reply shows here after Check mailbox matches it to a stored send.
                 </Callout>
                 <Table
                   headers={["Event", "When"]}
@@ -987,9 +987,8 @@ export function Records({
             valueSuffix=" people"
           />
           <Callout tone="warning" title="Opens and clicks are not a given">
-            Trace records that mail went out and nothing else. There is no open or click pixel
-            behind these numbers, and replies are not wired up yet, so this is a count of sends,
-            not a funnel.
+            Trace records that mail went out. There is no open or click pixel behind these
+            numbers. Human replies appear after Check mailbox matches a reply to a stored send.
           </Callout>
         </Stack>
       )}
