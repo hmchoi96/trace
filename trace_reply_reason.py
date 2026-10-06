@@ -37,6 +37,27 @@ OutreachMotion = Literal[
     "connector",
 ]
 
+SIGNAL_FAMILIES = (
+    "action_trigger",
+    "behavior_trigger",
+    "topic_trigger",
+    "relationship_trigger",
+    "unknown",
+)
+
+
+def signal_family_for(rec: dict[str, Any]) -> str:
+    """Reuse the reply-reason trigger. Do not invent a second taxonomy."""
+    raw = _text(rec.get("signal_family"))
+    if raw in SIGNAL_FAMILIES:
+        return raw
+    reply = rec.get("reply_reason") if isinstance(rec.get("reply_reason"), dict) else {}
+    trigger = _text(rec.get("trigger_type")) or _text(reply.get("trigger_type"))
+    if trigger in SIGNAL_FAMILIES and trigger != "unknown":
+        return trigger
+    return "unknown"
+
+
 MOTIONS = (
     "cold_product",
     "direct_application",

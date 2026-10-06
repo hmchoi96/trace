@@ -168,6 +168,25 @@ CREATE TABLE IF NOT EXISTS funnel_events (
 );
 CREATE INDEX IF NOT EXISTS idx_funnel_profile ON funnel_events(profile_id);
 
+CREATE TABLE IF NOT EXISTS mailbox_replies (
+    id                TEXT PRIMARY KEY,
+    graph_message_id  TEXT NOT NULL UNIQUE,
+    profile_id        TEXT NOT NULL,
+    candidate_id      TEXT,
+    send_id           TEXT,
+    conversation_id   TEXT NOT NULL DEFAULT '',
+    received_at       TEXT,
+    from_email        TEXT NOT NULL DEFAULT '',
+    subject           TEXT NOT NULL DEFAULT '',
+    reply_excerpt     TEXT NOT NULL DEFAULT '',
+    reply_quality     TEXT NOT NULL DEFAULT '',
+    matched_by        TEXT NOT NULL DEFAULT '',
+    is_automated      INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_replies_candidate ON mailbox_replies(candidate_id);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,
     type         TEXT NOT NULL,

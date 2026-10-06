@@ -56,11 +56,14 @@ def _sent_person(conn, *, conversation_id: str = "conv-1") -> None:
 def _reply(**extra):
     message = {
         "id": "m1",
+        "id": "m1",
         "subject": "RE: BDR role",
         "from": {"emailAddress": {"address": "troy@zip.com"}},
         "receivedDateTime": "2026-02-02T00:00:00Z",
         "bodyPreview": "Sounds interesting.",
-        "body": {"content": "Sounds interesting. Secret mailbox text."},
+        "body": {
+            "content": "Sounds interesting.\n\nOn Mon, Trace wrote:\nSecret mailbox text.",
+        },
         "conversationId": "conv-1",
     }
     message.update(extra)
@@ -87,14 +90,20 @@ def test_a_human_reply_is_stored_without_the_mail_body(conn):
     assert rec["reply_quality"] == "positive"
     assert "Secret mailbox text" not in json.dumps(rec)
     assert "reply_preview" not in rec
+    stored = conn.execute(
+        "SELECT reply_excerpt, graph_message_id FROM mailbox_replies"
+    ).fetchone()
+    assert stored["graph_message_id"] == "m1"
+    assert "Secret" not in stored["reply_excerpt"]
+    assert "Sounds interesting" in stored["reply_excerpt"]
     rows = conn.execute(
         "SELECT metadata_json FROM funnel_events WHERE event_type = 'human_reply'"
     ).fetchall()
     assert len(rows) == 1
     assert json.loads(rows[0][0]) == {"reply_quality": "positive"}
     report = service.cost_summary(conn, "oneaway")
-    assert report["counts"]["humanReplies"] == 1
-    assert report["counts"]["meaningfulReplies"] == 1
+    assert report["legacyExcluded"]["humanReplies"] == 1
+    assert report["counts"]["humanReplies"] == 0
 
 
 def test_an_automated_reply_does_not_count(conn):
@@ -128,9 +137,9 @@ def test_checking_twice_does_not_duplicate_the_person(conn):
         "SELECT COUNT(*) FROM funnel_events WHERE event_type = 'human_reply'"
     ).fetchone()[0]
     assert count == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM mailbox_replies").fetchone()["n"] == 1
     report = service.cost_summary(conn, "oneaway")
-    assert report["counts"]["sent"] == 1
-    assert report["counts"]["humanReplies"] == 1
+    assert report["legacyExcluded"]["sent"] == 1
 
 
 def test_a_later_classification_updates_the_same_reply(conn):
@@ -160,8 +169,40 @@ def test_a_later_classification_updates_the_same_reply(conn):
     assert len(rows) == 1
     assert json.loads(rows[0][0])["reply_quality"] == "negative"
     report = service.cost_summary(conn, "oneaway")
-    assert report["counts"]["humanReplies"] == 1
+    assert report["counts"]["humanReplies"] == 0
+    assert report["legacyExcluded"]["humanReplies"] == 1
     assert report["counts"]["meaningfulReplies"] == 0
+
+
+def test_two_replies_in_one_thread_stay_one_person(conn):
+    _sent_person(conn)
+    calls = {"n": 0}
+
+    def fetch(mailbox, since, folders):
+        calls["n"] += 1
+        return [
+            _reply(id="m1", receivedDateTime="2026-02-02T00:00:00Z", bodyPreview="Sounds interesting.", body={"content": "Sounds interesting."}),
+            _reply(
+                id="m2",
+                receivedDateTime="2026-02-03T00:00:00Z",
+                bodyPreview="Not interested.",
+                body={"content": "Not interested."},
+            ),
+        ]
+
+    first = service.sync_mailbox_replies(conn, "oneaway", fetch=fetch)
+    second = service.sync_mailbox_replies(conn, "oneaway", fetch=fetch)
+    assert first["newlyMatched"] == 2
+    assert second["newlyMatched"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM mailbox_replies").fetchone()["n"] == 2
+    report = service.cost_summary(conn, "oneaway")
+    rec = json.loads(
+        conn.execute("SELECT candidate_json FROM candidates WHERE id = 'cand_troy'").fetchone()[0]
+    )
+    assert rec["reply_quality"] == "negative"
+    assert report["counts"]["humanReplies"] == 0
+    assert report["legacyExcluded"]["sent"] == 1
+    assert report["legacyExcluded"]["humanReplies"] == 1
 
 
 def test_reply_check_requires_a_mailbox(conn, monkeypatch):

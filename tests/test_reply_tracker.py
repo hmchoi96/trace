@@ -146,3 +146,28 @@ def test_graph_reads_a_mailbox_user_not_me():
     url = graph_messages_url("sender@example.com", "inbox")
     assert url.endswith("/users/sender@example.com/mailFolders/inbox/messages")
     assert "/me/" not in url
+
+
+def test_quoted_original_does_not_change_the_new_reply_quality():
+    from reply_tracker import classify_reply_quality
+
+    thanks = _msg(
+        bodyPreview="Thanks, Brad",
+        body={"content": "Thanks, Brad\n\nOn Mon, Ada wrote:\nWhat time works?"},
+    )
+    refusal = _msg(
+        bodyPreview="Not interested",
+        body={"content": "Not interested\n\n-----Original Message-----\nSounds interesting. Are you free?"},
+    )
+    question = _msg(
+        bodyPreview="Can you send the details?",
+        body={"content": "Can you send the details?\n\nFrom: Trace\nSent: Monday\nThe old note."},
+    )
+    ooo = _msg(
+        bodyPreview="I am out of the office until Monday.",
+        body={"content": "I am out of the office until Monday.\n\nOn Mon, Ada wrote:\nNot interested?"},
+    )
+    assert classify_reply_quality(thanks) == "neutral"
+    assert classify_reply_quality(refusal) == "negative"
+    assert classify_reply_quality(question) == "engaged"
+    assert classify_reply_quality(ooo) == "automated"

@@ -214,7 +214,7 @@ export default function TracePage() {
     try {
       const result = await api.syncReplies(profileId);
       setReplyNote(
-        `Checked ${result.scanned} mailbox messages against ${result.sends} sends. Human replies: ${result.humanReplies}.`,
+        `Scanned ${result.scanned}. Newly matched ${result.newlyMatched}. Human replies ${result.humanReplies}. Automated ignored ${result.automatedIgnored}. Manual review ${result.manualReview}. Last checked ${result.checkedAt}.`,
       );
       await loadCost(profileId, huntLimit, costWindow, costStart, costEnd, costHunt);
       await loadPeople(profileId);
@@ -897,6 +897,9 @@ export default function TracePage() {
             busy={recordBusy || sendBusyId !== null || bulkPullProgress !== null}
             pullingContactId={pullContactId}
             bulkPullProgress={bulkPullProgress}
+            replyNote={replyNote}
+            replyBusy={replyBusy}
+            onCheckReplies={() => void checkReplies()}
           />
         )}
 

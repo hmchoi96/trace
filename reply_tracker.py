@@ -67,9 +67,43 @@ def _body_text(message: dict[str, Any]) -> str:
     return (b.get("content") or message.get("bodyPreview") or "") or ""
 
 
-def _message_text(message: dict[str, Any]) -> str:
-    subj = message.get("subject") or ""
-    return f"{message.get('bodyPreview', '')} {_body_text(message)} {subj}".lower()
+def _plain_text(value: str) -> str:
+    text = re.sub(r"(?is)<br\s*/?>", "\n", value or "")
+    text = re.sub(r"(?is)</p>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return text.replace("&nbsp;", " ")
+
+
+_QUOTE_CUTS = (
+    re.compile(r"\nOn [^\n]{0,300} wrote:\s*", re.I),
+    re.compile(r"\n-{5,}\s*Original Message\s*-{5,}", re.I),
+    re.compile(r"\n_{5,}"),
+    re.compile(r"\nFrom:\s", re.I),
+    re.compile(r"\n보낸 사람\s*:", re.I),
+)
+
+
+def strip_quoted_reply(text: str) -> str:
+    """Keep the new reply. Quoted Outlook and Gmail threads are not the reply."""
+    plain = _plain_text(text or "")
+    cut = len(plain)
+    for pattern in _QUOTE_CUTS:
+        match = pattern.search(plain)
+        if match:
+            cut = min(cut, match.start())
+    return plain[:cut].strip()
+
+
+def reply_excerpt(message: dict[str, Any], limit: int = 500) -> str:
+    fresh = strip_quoted_reply(_body_text(message))
+    if not fresh:
+        fresh = strip_quoted_reply(str(message.get("bodyPreview") or ""))
+    return " ".join(fresh.split())[:limit]
+
+
+def _classification_text(message: dict[str, Any]) -> str:
+    """Quality uses the new reply and the subject, not the quoted original."""
+    return f"{reply_excerpt(message)} {message.get('subject') or ''}".lower()
 
 
 def classify_reply_quality(message: dict[str, Any]) -> str:
@@ -77,7 +111,7 @@ def classify_reply_quality(message: dict[str, Any]) -> str:
 
     Automated mail is not a human reply and is not a success.
     """
-    text = _message_text(message)
+    text = _classification_text(message)
     sender = _sender_addr(message)
     automated = (
         "automatic reply",
@@ -143,7 +177,7 @@ def classify_reply_quality(message: dict[str, Any]) -> str:
 
 
 def classify_reply_type(message: dict[str, Any]) -> str:
-    text = _message_text(message)
+    text = _classification_text(message)
     if any(
         x in text
         for x in ("out of office", "out of the office", "automatic reply", "away from the office", "auto-reply")
@@ -328,18 +362,11 @@ def _quotes_original(message: dict[str, Any], outreach: dict[str, Any]) -> bool:
     return False
 
 
-def match_reply_to_outreach(
+def link_reply(
     message: dict[str, Any],
     outreach: dict[str, Any],
 ) -> str | None:
-    """
-    Match order:
-    conversation_id, sender_subject, domain_subject, quoted_original, manual_review.
-    Same subject alone does not match. Automated mail does not match.
-    """
-    if not is_human_reply(message):
-        return None
-
+    """Match a mailbox message to one send. Quoted text is used only for the quote check."""
     sender = _sender_addr(message)
     mailbox = (SENDER_EMAIL or "").strip().lower()
     if sender and mailbox and sender == mailbox:
@@ -371,6 +398,20 @@ def match_reply_to_outreach(
     if same_domain and _subjects_related(ours_sub, subj_m):
         return "manual_review"
     return None
+
+
+def match_reply_to_outreach(
+    message: dict[str, Any],
+    outreach: dict[str, Any],
+) -> str | None:
+    """
+    Match order:
+    conversation_id, sender_subject, domain_subject, quoted_original, manual_review.
+    Same subject alone does not match. Automated mail does not match.
+    """
+    if not is_human_reply(message):
+        return None
+    return link_reply(message, outreach)
 
 
 _MATCH_RANK = {

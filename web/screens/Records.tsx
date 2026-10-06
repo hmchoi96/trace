@@ -478,10 +478,19 @@ function RecordDetail({
                 <Text weight="semibold">{person.lastSend.subject}</Text>
                 {person.lastSend.body && <Text>{person.lastSend.body}</Text>}
                 {person.replyQuality ? (
-                  <Text size="small">
-                    Human reply · {replyQualityLabel(person.replyQuality)}
-                    {person.firstReplyAt ? ` · ${timestamp(person.firstReplyAt)}` : ""}
-                  </Text>
+                  <Stack gap={4}>
+                    <Text size="small">
+                      Human reply · {replyQualityLabel(person.replyQuality)}
+                      {person.replyReceivedAt ? ` · ${timestamp(person.replyReceivedAt)}` : ""}
+                    </Text>
+                    {person.replyFrom ? (
+                      <Text size="small" tone="tertiary">From {person.replyFrom}</Text>
+                    ) : null}
+                    {person.replyExcerpt ? <Text>{person.replyExcerpt}</Text> : null}
+                    {person.replyMatchedBy ? (
+                      <Text size="small" tone="tertiary">Matched by {person.replyMatchedBy}</Text>
+                    ) : null}
+                  </Stack>
                 ) : null}
               </Stack>
             )}
@@ -752,6 +761,9 @@ export function Records({
   busy,
   pullingContactId,
   bulkPullProgress,
+  replyNote = "",
+  replyBusy = false,
+  onCheckReplies,
 }: {
   profile: Profile;
   people: Person[];
@@ -779,6 +791,9 @@ export function Records({
   busy: boolean;
   pullingContactId: string | null;
   bulkPullProgress: { done: number; total: number; found: number } | null;
+  replyNote?: string;
+  replyBusy?: boolean;
+  onCheckReplies?: () => void;
 }) {
   const [filter, setFilter] = useState<RecordFilter>("all");
   const [foundFilter, setFoundFilter] = useState<FoundFilter>("all");
@@ -949,6 +964,18 @@ export function Records({
           onClick={() => pick("replied")}
         />
       </Row>
+      {onCheckReplies ? (
+        <Row gap={8} align="center">
+          <Button
+            variant="secondary"
+            disabled={replyBusy || !health?.mailboxReady}
+            onClick={onCheckReplies}
+          >
+            {replyBusy ? "Checking mailbox…" : "Check mailbox for replies"}
+          </Button>
+          {replyNote ? <Text size="small" tone="secondary">{replyNote}</Text> : null}
+        </Row>
+      ) : null}
 
       {showTracking && (
         <Stack gap={8}>

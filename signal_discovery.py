@@ -2343,6 +2343,7 @@ def _fill_actionable_slots(
                 profile_key=profile_key,
                 product_name=product_name,
             )
+            early_key = str(rec.get("entity_key") or "")
             kind = _slot_kind(rec, profile)
             if kind in ("find_owner", "verify_behavior"):
                 person = qual.get("person") or {}
@@ -2365,10 +2366,16 @@ def _fill_actionable_slots(
                     product_name=product_name,
                 )
                 kind = "ready" if _slot_kind(rec, profile) == "ready" else "reject"
+            from trace_reply_reason import signal_family_for
+
+            rec["signal_family"] = signal_family_for(rec)
+            final_key = str(rec.get("entity_key") or "")
+            aliases = [early_key] if early_key and early_key != final_key else []
             if kind == "ready":
                 ready.append(rec)
             reviewed_people.append({
-                "entity_key": rec.get("entity_key") or "",
+                "entity_key": final_key,
+                "entity_aliases": aliases,
                 "source_channel": rec.get("signal_source") or sig.get("source") or "",
                 "signal_family": rec.get("signal_family") or "",
                 "draft_decision": rec.get("draft_decision") or "",

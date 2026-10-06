@@ -150,6 +150,10 @@ export type Person = {
   sendMethod: "trace" | "self" | null;
   replyQuality?: string | null;
   firstReplyAt?: string | null;
+  replyReceivedAt?: string | null;
+  replyExcerpt?: string | null;
+  replyFrom?: string | null;
+  replyMatchedBy?: string | null;
   lastSend: {
     subject: string;
     body: string;
@@ -304,6 +308,17 @@ export type Cost = {
   bySource: CostAttribution[];
   bySignal: CostAttribution[];
   byHuntDetail: CostAttribution[];
+  namedReviewed?: number;
+  legacyExcluded?: {
+    outreachReady: number;
+    approved: number;
+    contactFound: number;
+    drafted: number;
+    sent: number;
+    humanReplies: number;
+    meaningfulReplies: number;
+    meetings: number;
+  };
   nextHunt: CostForecast;
   limits: number[];
 };
@@ -459,10 +474,16 @@ export const api = {
     return rows.map((row) => normalizeHuntSummary(row as Partial<HuntSummary> & Pick<HuntSummary, "id" | "status">));
   },
   syncReplies: (profileId: string) =>
-    post<{ mailbox: string; sends: number; scanned: number; humanReplies: number }>(
-      `/api/profiles/${encodeURIComponent(profileId)}/replies/sync`,
-      {},
-    ),
+    post<{
+      mailbox: string;
+      sends: number;
+      scanned: number;
+      humanReplies: number;
+      newlyMatched: number;
+      automatedIgnored: number;
+      manualReview: number;
+      checkedAt: string;
+    }>(`/api/profiles/${encodeURIComponent(profileId)}/replies/sync`, {}),
   cost: (profileId: string, limit: number, window = "all", start = "", end = "", huntId = "") => {
     const params = new URLSearchParams({ limit: String(limit), window });
     if (start) params.set("start", start);

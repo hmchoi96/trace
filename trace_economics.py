@@ -172,6 +172,43 @@ def person_key(event: dict[str, Any]) -> str:
     return str(event.get("candidate_id") or event.get("entity_key") or event.get("id") or "")
 
 
+def canonical_identities(events: list[dict[str, Any]]) -> dict[str, str]:
+    """Map candidate ids, final keys, and earlier name-only keys to one person."""
+    aliases: dict[str, str] = {}
+    left_parts: dict[str, list[str]] = {}
+    for event in events:
+        if event.get("event_type") != "candidate_reviewed":
+            continue
+        canonical = str(event.get("candidate_id") or event.get("entity_key") or "")
+        if not canonical:
+            continue
+        for raw in (event.get("candidate_id"), event.get("entity_key")):
+            if raw:
+                aliases[str(raw)] = canonical
+        meta = event.get("metadata")
+        if not isinstance(meta, dict):
+            meta = _loads(event.get("metadata_json"))
+        for alias in meta.get("entity_aliases") or []:
+            if alias:
+                aliases[str(alias)] = canonical
+        entity = str(event.get("entity_key") or "")
+        if "|" in entity:
+            left_parts.setdefault(entity.split("|", 1)[0], []).append(canonical)
+    for left, targets in left_parts.items():
+        unique = list(dict.fromkeys(targets))
+        if len(unique) == 1 and left not in aliases:
+            aliases[left] = unique[0]
+    return aliases
+
+
+def identity_of(event: dict[str, Any], aliases: dict[str, str] | None = None) -> str:
+    aliases = aliases or {}
+    for raw in (event.get("candidate_id"), event.get("entity_key")):
+        if raw and str(raw) in aliases:
+            return aliases[str(raw)]
+    return person_key(event)
+
+
 def allocate_wave(
     cost_usd: float | None,
     people: list[str],
@@ -264,7 +301,7 @@ def _insert_funnel(
 ) -> None:
     meta = _dumps(metadata)
     existing = conn.execute(
-        "SELECT id, metadata_json FROM funnel_events WHERE source_key = ?",
+        "SELECT id, metadata_json, signal_family FROM funnel_events WHERE source_key = ?",
         (source_key,),
     ).fetchone()
     if existing:
@@ -272,6 +309,11 @@ def _insert_funnel(
             conn.execute(
                 "UPDATE funnel_events SET metadata_json = ?, event_type = ? WHERE source_key = ?",
                 (meta, event_type, source_key),
+            )
+        if signal_family and not (existing["signal_family"] or "").strip():
+            conn.execute(
+                "UPDATE funnel_events SET signal_family = ? WHERE source_key = ?",
+                (signal_family, source_key),
             )
         return
     conn.execute(
@@ -354,6 +396,15 @@ def sync_profile(conn, profile_id: str) -> None:
     ).fetchall()
     for row in rows:
         rec = _loads(row["candidate_json"])
+        from trace_reply_reason import signal_family_for
+
+        family = signal_family_for(rec)
+        if str(rec.get("signal_family") or "") != family:
+            rec["signal_family"] = family
+            conn.execute(
+                "UPDATE candidates SET candidate_json = ? WHERE id = ?",
+                (_dumps(rec), row["id"]),
+            )
         entity = str(row["entity_key"] or rec.get("entity_key") or "")
         identity = entity or row["id"]
         channel = _channel_label(str(row["found_on"] or ""))
@@ -523,6 +574,9 @@ def record_review_batch(conn, profile_id: str, hunt_id: str, people: list[dict[s
         channel = _channel_label(str(person.get("source_channel") or ""))
         family = str(person.get("signal_family") or "")
         meta = {"wave_id": str(person.get("wave_id") or "")}
+        aliases = [str(item) for item in (person.get("entity_aliases") or []) if item]
+        if aliases:
+            meta["entity_aliases"] = aliases
         record_funnel(
             conn,
             profile_id=profile_id,
@@ -681,30 +735,29 @@ def refresh_wave_allocations(conn, hunt_id: str) -> None:
             people = []
         keys = []
         seen = set()
+        aliases = canonical_identities([dict(row) for row in reviewed])
         for person in people:
-            key = person_key(dict(person))
+            key = identity_of(dict(person), aliases)
             if key and key not in seen:
                 seen.add(key)
                 keys.append(person)
-        reviewed_n = 0
-        hunt_row = conn.execute("SELECT reviewed_n FROM hunts WHERE id = ?", (hunt_id,)).fetchone()
-        if hunt_row:
-            reviewed_n = int(hunt_row["reviewed_n"] or 0)
+        stored = int(meta.get("reviewed_count") or 0)
+        meta["reviewed_count"] = max(stored, len(keys))
         plan = allocate_wave(
             wave["cost_usd"],
-            [person_key(dict(person)) for person in keys],
-            denominator=reviewed_n,
+            [identity_of(dict(person), aliases) for person in keys],
+            denominator=meta["reviewed_count"] if meta["reviewed_count"] > len(keys) else None,
         )
         method = plan["allocation_method"] if plan["tracked"] else "unallocated"
         conn.execute(
-            "UPDATE cost_events SET allocation_method = ? WHERE id = ?",
-            (method, wave["id"]),
+            "UPDATE cost_events SET allocation_method = ?, metadata_json = ? WHERE id = ?",
+            (method, _dumps(meta), wave["id"]),
         )
         if method != "equal_split":
             continue
         share_by_key = {item["key"]: item["allocated_usd"] for item in plan["shares"]}
         for person in keys:
-            key = person_key(dict(person))
+            key = identity_of(dict(person), aliases)
             conn.execute(
                 """
                 INSERT OR IGNORE INTO cost_events (
@@ -745,7 +798,15 @@ def _quality(event: dict[str, Any]) -> str:
     return str(meta.get("reply_quality") or event.get("event_type") or "").lower()
 
 
-def funnel_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+def funnel_counts(events: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, int]]:
+    """Strict funnel counts, plus outcomes that skipped an earlier stage.
+
+    A later stage only counts people who also passed every stage before it.
+    Conversion therefore cannot exceed 100%. The skipped outcomes stay in
+    legacyExcluded and are not deleted.
+    """
+    aliases = canonical_identities(events)
+
     def ids(types: set[str], *, quality: set[str] | None = None) -> set[str]:
         found = set()
         for event in events:
@@ -753,24 +814,33 @@ def funnel_counts(events: list[dict[str, Any]]) -> dict[str, int]:
                 continue
             if quality is not None and _quality(event) not in quality:
                 continue
-            key = person_key(event)
+            key = identity_of(event, aliases)
             if key:
                 found.add(key)
         return found
 
     reviewed = ids({"candidate_reviewed"})
-    ready = ids({"outreach_ready"})
-    approved = ids({"human_approved"})
-    contact = ids({"contact_found"})
-    drafted = ids({"draft_generated"})
-    sendable = ids({"sendable"})
-    sent = ids({"email_sent"})
-    human = ids({"human_reply"}, quality=HUMAN_QUALITIES)
-    meaningful = ids({"human_reply"}, quality=MEANINGFUL_QUALITIES)
-    meeting = ids({"meeting_booked"})
-    trial = ids({"trial_started"})
-    customer = ids({"customer_won"})
-    return {
+    raw_ready = ids({"outreach_ready"})
+    raw_approved = ids({"human_approved"})
+    raw_contact = ids({"contact_found"})
+    raw_drafted = ids({"draft_generated"})
+    raw_sendable = ids({"sendable"})
+    raw_sent = ids({"email_sent"})
+    raw_human = ids({"human_reply"}, quality=HUMAN_QUALITIES)
+    raw_meaningful = ids({"human_reply"}, quality=MEANINGFUL_QUALITIES)
+    raw_meeting = ids({"meeting_booked"})
+    ready = reviewed & raw_ready
+    approved = ready & raw_approved
+    contact = approved & raw_contact
+    drafted = contact & raw_drafted
+    sendable = drafted & raw_sendable
+    sent = sendable & raw_sent
+    human = sent & raw_human
+    meaningful = sent & raw_meaningful
+    meeting = sent & raw_meeting
+    trial = sent & ids({"trial_started"})
+    customer = sent & ids({"customer_won"})
+    counts = {
         "reviewed": len(reviewed),
         "outreach_ready": len(ready),
         "approved": len(approved),
@@ -784,6 +854,17 @@ def funnel_counts(events: list[dict[str, Any]]) -> dict[str, int]:
         "trial": len(trial),
         "customer": len(customer),
     }
+    legacy = {
+        "outreachReady": len(raw_ready - ready),
+        "approved": len(raw_approved - approved),
+        "contactFound": len(raw_contact - contact),
+        "drafted": len(raw_drafted - drafted),
+        "sent": len(raw_sent - sent),
+        "humanReplies": len(raw_human - human),
+        "meaningfulReplies": len(raw_meaningful - meaningful),
+        "meetings": len(raw_meeting - meeting),
+    }
+    return counts, legacy
 
 
 def _window_bounds(window: str, start: str | None, end: str | None) -> tuple[datetime | None, datetime | None]:
@@ -804,9 +885,11 @@ def _in_cohort(
     start: datetime | None,
     end: datetime | None,
     attribution_days: int | None,
+    aliases: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     if not hunt_id and start is None and end is None:
         return events
+    aliases = aliases or {}
     reviewed = [event for event in events if event.get("event_type") == "candidate_reviewed"]
     if hunt_id:
         reviewed = [event for event in reviewed if event.get("hunt_id") == hunt_id]
@@ -818,11 +901,11 @@ def _in_cohort(
         if end and (at is None or at > end):
             continue
         kept_review.append(event)
-    origins = {person_key(event): _parse_time(event.get("occurred_at")) for event in kept_review}
+    origins = {identity_of(event, aliases): _parse_time(event.get("occurred_at")) for event in kept_review}
     keys = set(origins)
     selected = []
     for event in events:
-        key = person_key(event)
+        key = identity_of(event, aliases)
         if key not in keys:
             continue
         if attribution_days is None:
@@ -875,19 +958,24 @@ def _stage_rollup(costs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _source_of(event: dict[str, Any], people: dict[str, dict[str, str]]) -> tuple[str, str]:
-    person = people.get(person_key(event)) or {}
+def _source_of(
+    event: dict[str, Any],
+    people: dict[str, dict[str, str]],
+    aliases: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    person = people.get(identity_of(event, aliases)) or {}
     channel = person.get("source") or event.get("source_channel") or ""
     family = person.get("family") or event.get("signal_family") or ""
     return channel or "Unknown", family or "Unknown"
 
 
 def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    aliases = canonical_identities(funnel)
     people: dict[str, dict[str, str]] = {}
     for event in funnel:
         if event.get("event_type") != "candidate_reviewed":
             continue
-        key = person_key(event)
+        key = identity_of(event, aliases)
         people[key] = {
             "source": event.get("source_channel") or "Unknown",
             "family": event.get("signal_family") or "Unknown",
@@ -916,8 +1004,8 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
     for event in funnel:
         if event.get("event_type") != "candidate_reviewed":
             continue
-        key = person_key(event)
-        channel, family = _source_of(event, people)
+        key = identity_of(event, aliases)
+        channel, family = _source_of(event, people, aliases)
         hunt = event.get("hunt_id") or "Unknown"
         bump(sources, channel, None, key, "reviewed")
         bump(families, family, None, key, "reviewed")
@@ -934,17 +1022,17 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
             if quality in HUMAN_QUALITIES:
                 stage = "human"
             if quality in MEANINGFUL_QUALITIES:
-                channel, family = _source_of(event, people)
-                hunt = people.get(person_key(event), {}).get("hunt") or event.get("hunt_id") or "Unknown"
-                key = person_key(event)
+                channel, family = _source_of(event, people, aliases)
+                hunt = people.get(identity_of(event, aliases), {}).get("hunt") or event.get("hunt_id") or "Unknown"
+                key = identity_of(event, aliases)
                 bump(sources, channel, None, key, "meaningful")
                 bump(families, family, None, key, "meaningful")
                 bump(hunts, hunt, None, key, "meaningful")
         if not stage:
             continue
-        channel, family = _source_of(event, people)
-        hunt = people.get(person_key(event), {}).get("hunt") or event.get("hunt_id") or "Unknown"
-        key = person_key(event)
+        channel, family = _source_of(event, people, aliases)
+        hunt = people.get(identity_of(event, aliases), {}).get("hunt") or event.get("hunt_id") or "Unknown"
+        key = identity_of(event, aliases)
         bump(sources, channel, None, key, stage)
         bump(families, family, None, key, stage)
         bump(hunts, hunt, None, key, stage)
@@ -955,7 +1043,7 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
         if cost.get("cost_scope") == "wave" and cost.get("allocation_method") == "equal_split":
             continue
         if cost.get("cost_scope") == "candidate" and cost.get("allocation_method") == "direct":
-            channel, family = _source_of(cost, people)
+            channel, family = _source_of(cost, people, aliases)
             hunt = cost.get("hunt_id") or "Unknown"
         elif cost.get("cost_scope") == "wave":
             channel, family, hunt = "Unknown", "Unknown", cost.get("hunt_id") or "Unknown"
@@ -974,7 +1062,7 @@ def _attribute(costs: list[dict[str, Any]], funnel: list[dict[str, Any]]) -> tup
         amount = float(cost["cost_usd"])
         if parent:
             allocated_by_parent[parent] = allocated_by_parent.get(parent, 0.0) + amount
-        channel, family = _source_of(cost, people)
+        channel, family = _source_of(cost, people, aliases)
         hunt = cost.get("hunt_id") or "Unknown"
         bump(sources, channel, amount, "", "spend")
         bump(families, family, amount, "", "spend")
@@ -1050,6 +1138,7 @@ def campaign_report(
     funnel = [_decorate(row) for row in _rows(conn, "SELECT * FROM funnel_events WHERE profile_id = ?", (profile_id,))]
     start_at, end_at = _window_bounds(window, start, end)
     filtered = window != "all" or bool(hunt_id)
+    aliases = canonical_identities(funnel)
     if filtered:
         funnel = _in_cohort(
             funnel,
@@ -1057,16 +1146,17 @@ def campaign_report(
             start=start_at,
             end=end_at,
             attribution_days=attribution_days if window != "all" else None,
+            aliases=aliases,
         )
-        people = {person_key(event) for event in funnel}
+        people = {identity_of(event, aliases) for event in funnel}
         costs = [
             row
             for row in costs
             if (hunt_id and row.get("hunt_id") == hunt_id)
-            or person_key(row) in people
+            or identity_of(row, aliases) in people
             or (row.get("cost_scope") == "wave" and row.get("hunt_id") in {event.get("hunt_id") for event in funnel})
         ]
-    counts = funnel_counts(funnel)
+    counts, legacy = funnel_counts(funnel)
     named_reviewed = counts["reviewed"]
     if window == "all":
         for hunt in conn.execute(
@@ -1076,7 +1166,7 @@ def campaign_report(
             if hunt_id and hunt["id"] != hunt_id:
                 continue
             named = {
-                person_key(_decorate(row))
+                identity_of(_decorate(row), aliases)
                 for row in conn.execute(
                     "SELECT * FROM funnel_events WHERE hunt_id = ? AND event_type = 'candidate_reviewed'",
                     (hunt["id"],),
@@ -1186,6 +1276,7 @@ def campaign_report(
         "bySignal": by_signal,
         "byHuntDetail": by_hunt,
         "namedReviewed": named_reviewed,
+        "legacyExcluded": legacy,
     }
 
 

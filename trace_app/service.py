@@ -1367,6 +1367,10 @@ def sync_mailbox_replies(
             "sends": 0,
             "scanned": 0,
             "humanReplies": 0,
+            "newlyMatched": 0,
+            "automatedIgnored": 0,
+            "manualReview": 0,
+            "checkedAt": now_iso(),
         }
 
     earliest = min(
@@ -1379,7 +1383,13 @@ def sync_mailbox_replies(
     else:
         messages = fetch(mailbox, since, MAILBOX_REPLY_FOLDERS)
 
-    from reply_tracker import apply_reply_matches
+    from reply_tracker import (
+        classify_reply_quality,
+        is_human_reply,
+        link_reply,
+        reply_excerpt,
+        _sender_addr,
+    )
     from trace_economics import HUMAN_QUALITIES, sync_profile
 
     outreach = [
@@ -1391,41 +1401,105 @@ def sync_mailbox_replies(
             "conversation_id": row["conversation_id"] or "",
             "sent_at": row["sent_at"],
             "candidate_id": row["candidate_id"],
+            "send_id": row["id"],
         }
         for row in sends
     ]
-    apply_reply_matches(outreach, messages)
-
-    chosen: dict[str, dict[str, Any]] = {}
-    for row in outreach:
-        if row.get("reply_status") != "replied":
+    checked_at = now_iso()
+    newly = 0
+    automated = 0
+    manual = 0
+    for message in messages:
+        best: tuple[int, dict[str, Any], str] | None = None
+        for rec in outreach:
+            how = link_reply(message, rec)
+            if not how:
+                continue
+            rank = {"conversation_id": 0, "sender_subject": 1, "domain_subject": 2, "quoted_original": 3, "manual_review": 4}[how]
+            if best is None or rank < best[0]:
+                best = (rank, rec, how)
+        if not best:
             continue
-        quality = str(row.get("reply_quality") or "").lower()
-        if quality not in HUMAN_QUALITIES:
+        _, send, how = best
+        quality = classify_reply_quality(message)
+        auto = (not is_human_reply(message)) or quality == "automated"
+        if how == "manual_review":
+            manual += 1
+        elif auto:
+            automated += 1
+        graph_id = str(message.get("id") or "").strip()
+        if not graph_id:
             continue
-        candidate_id = str(row["candidate_id"])
-        previous = chosen.get(candidate_id)
-        if previous and (previous.get("last_reply_at") or "") > (row.get("last_reply_at") or ""):
-            continue
-        chosen[candidate_id] = {
-            "reply_quality": quality,
-            "reply_status": "replied",
-            "first_reply_at": row.get("first_reply_at"),
-            "last_reply_at": row.get("last_reply_at"),
-            "matched_by": row.get("matched_by"),
-        }
-
-    for candidate_id, fields in chosen.items():
+        existing = conn.execute(
+            "SELECT id FROM mailbox_replies WHERE graph_message_id = ?",
+            (graph_id,),
+        ).fetchone()
+        excerpt = reply_excerpt(message)
+        fields = (
+            send["candidate_id"],
+            send["send_id"],
+            str(message.get("conversationId") or ""),
+            str(message.get("receivedDateTime") or ""),
+            _sender_addr(message),
+            str(message.get("subject") or ""),
+            excerpt,
+            "" if auto or how == "manual_review" else quality,
+            how,
+            1 if auto else 0,
+            checked_at,
+        )
+        if existing:
+            conn.execute(
+                """
+                UPDATE mailbox_replies
+                SET candidate_id = ?, send_id = ?, conversation_id = ?, received_at = ?,
+                    from_email = ?, subject = ?, reply_excerpt = ?, reply_quality = ?,
+                    matched_by = ?, is_automated = ?, updated_at = ?
+                WHERE graph_message_id = ?
+                """,
+                (*fields, graph_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO mailbox_replies (
+                    id, graph_message_id, profile_id, candidate_id, send_id, conversation_id,
+                    received_at, from_email, subject, reply_excerpt, reply_quality, matched_by,
+                    is_automated, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (profiles.new_id("reply"), graph_id, profile_id, *fields, checked_at),
+            )
+            if not auto and how != "manual_review" and quality in HUMAN_QUALITIES:
+                newly += 1
+    human_rows = conn.execute(
+        """
+        SELECT candidate_id, reply_quality, received_at
+        FROM mailbox_replies
+        WHERE profile_id = ? AND is_automated = 0 AND reply_quality != ''
+        ORDER BY received_at ASC
+        """,
+        (profile_id,),
+    ).fetchall()
+    by_candidate: dict[str, list[Any]] = {}
+    for row in human_rows:
+        by_candidate.setdefault(row["candidate_id"], []).append(row)
+    for candidate_id, replies in by_candidate.items():
         cand = conn.execute(
             "SELECT candidate_json FROM candidates WHERE id = ?",
             (candidate_id,),
         ).fetchone()
         if not cand:
             continue
+        latest = replies[-1]
         rec = db.loads(cand["candidate_json"], {})
         rec.pop("reply_preview", None)
         rec.pop("reply_subject", None)
-        rec.update(fields)
+        rec["reply_quality"] = latest["reply_quality"]
+        rec["reply_status"] = "replied"
+        rec["first_reply_at"] = replies[0]["received_at"]
+        rec["last_reply_at"] = latest["received_at"]
+        rec["matched_by"] = "mailbox"
         conn.execute(
             "UPDATE candidates SET candidate_json = ? WHERE id = ?",
             (db.dumps(rec), candidate_id),
@@ -1436,7 +1510,11 @@ def sync_mailbox_replies(
         "mailbox": mailbox,
         "sends": len(sends),
         "scanned": len(messages),
-        "humanReplies": len(chosen),
+        "humanReplies": len(by_candidate),
+        "newlyMatched": newly,
+        "automatedIgnored": automated,
+        "manualReview": manual,
+        "checkedAt": checked_at,
     }
 
 
@@ -1596,6 +1674,16 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "SELECT text, created_at FROM notes WHERE candidate_id = ? ORDER BY created_at ASC",
         (row["id"],),
     ).fetchall()
+    reply_row = conn.execute(
+        """
+        SELECT received_at, from_email, reply_excerpt, reply_quality, matched_by
+        FROM mailbox_replies
+        WHERE candidate_id = ? AND is_automated = 0 AND reply_quality != ''
+        ORDER BY received_at DESC
+        LIMIT 1
+        """,
+        (row["id"],),
+    ).fetchone()
     return {
         "id": row["id"],
         "profileId": row["profile_id"],
@@ -1641,8 +1729,12 @@ def candidate_dto(conn, row: dict[str, Any]) -> dict[str, Any]:
         "draft": _draft_dto(draft),
         "sentAt": send["sent_at"] if send else None,
         "sendMethod": send["method"] if send else None,
-        "replyQuality": str(rec.get("reply_quality") or "") or None,
-        "firstReplyAt": rec.get("first_reply_at") or None,
+        "replyQuality": (reply_row["reply_quality"] if reply_row else None) or str(rec.get("reply_quality") or "") or None,
+        "firstReplyAt": rec.get("first_reply_at") or (reply_row["received_at"] if reply_row else None),
+        "replyReceivedAt": reply_row["received_at"] if reply_row else None,
+        "replyExcerpt": reply_row["reply_excerpt"] if reply_row else None,
+        "replyFrom": reply_row["from_email"] if reply_row else None,
+        "replyMatchedBy": reply_row["matched_by"] if reply_row else None,
         "lastSend": _send_dto(send),
         "notes": [{"text": n["text"], "at": n["created_at"]} for n in notes],
         "costTrace": _cost_trace(conn, row),

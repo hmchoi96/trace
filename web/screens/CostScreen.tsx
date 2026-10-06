@@ -192,6 +192,15 @@ export function CostScreen({
           </Button>
           {replyNote ? <Text size="small" tone="secondary">{replyNote}</Text> : null}
         </Row>
+        {cost.legacyExcluded && Object.values(cost.legacyExcluded).some((count) => count > 0) ? (
+          <Text size="small" tone="tertiary">
+            Legacy outcomes stay out of this funnel
+            {cost.legacyExcluded.approved ? ` · approved ${cost.legacyExcluded.approved}` : ""}
+            {cost.legacyExcluded.humanReplies ? ` · replies ${cost.legacyExcluded.humanReplies}` : ""}
+            {cost.legacyExcluded.sent ? ` · sent ${cost.legacyExcluded.sent}` : ""}.
+            Strict conversion does not exceed 100%.
+          </Text>
+        ) : null}
       </Stack>
 
       <Stack gap={8}>

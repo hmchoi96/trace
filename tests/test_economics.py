@@ -191,6 +191,13 @@ def test_send_now_is_one_outreach_ready_event(conn):
     record_funnel(
         conn,
         profile_id="oneaway",
+        event_type="candidate_reviewed",
+        candidate_id="cand_1",
+        entity_key="ada",
+    )
+    record_funnel(
+        conn,
+        profile_id="oneaway",
         event_type="outreach_ready",
         candidate_id="cand_1",
         entity_key="ada",
@@ -234,38 +241,54 @@ def test_automated_reply_does_not_count_as_human(conn):
     assert report["counts"]["meaningfulReplies"] == 0
 
 
+def _through_sendable(conn, candidate_id: str, entity_key: str) -> None:
+    for event_type in (
+        "candidate_reviewed",
+        "outreach_ready",
+        "human_approved",
+        "contact_found",
+        "draft_generated",
+        "sendable",
+    ):
+        record_funnel(
+            conn,
+            profile_id="oneaway",
+            event_type=event_type,
+            candidate_id=candidate_id,
+            entity_key=entity_key,
+        )
+
+
 def test_positive_and_engaged_are_meaningful(conn):
-    record_funnel(
-        conn,
-        profile_id="oneaway",
-        event_type="human_reply",
-        candidate_id="cand_1",
-        entity_key="a",
-        metadata={"reply_quality": "positive"},
-    )
-    record_funnel(
-        conn,
-        profile_id="oneaway",
-        event_type="human_reply",
-        candidate_id="cand_2",
-        entity_key="b",
-        metadata={"reply_quality": "engaged"},
-    )
-    record_funnel(
-        conn,
-        profile_id="oneaway",
-        event_type="human_reply",
-        candidate_id="cand_3",
-        entity_key="c",
-        metadata={"reply_quality": "neutral"},
-    )
+    for candidate_id, entity_key, quality in (
+        ("cand_1", "a", "positive"),
+        ("cand_2", "b", "engaged"),
+        ("cand_3", "c", "neutral"),
+    ):
+        _through_sendable(conn, candidate_id, entity_key)
+        record_funnel(
+            conn,
+            profile_id="oneaway",
+            event_type="email_sent",
+            candidate_id=candidate_id,
+            entity_key=entity_key,
+            source_key=f"email_sent:{candidate_id}",
+        )
+        record_funnel(
+            conn,
+            profile_id="oneaway",
+            event_type="human_reply",
+            candidate_id=candidate_id,
+            entity_key=entity_key,
+            metadata={"reply_quality": quality},
+        )
     report = campaign_report(conn, "oneaway")
     assert report["counts"]["humanReplies"] == 3
     assert report["counts"]["meaningfulReplies"] == 2
 
 
 def test_followups_do_not_duplicate_the_prospect(conn):
-    record_funnel(conn, profile_id="oneaway", event_type="candidate_reviewed", candidate_id="cand_1", entity_key="ada")
+    _through_sendable(conn, "cand_1", "ada")
     record_funnel(
         conn, profile_id="oneaway", event_type="email_sent", candidate_id="cand_1", entity_key="ada",
         source_key="email_sent:send_1",
@@ -362,6 +385,93 @@ def test_import_is_idempotent_and_keeps_missing_cost_unknown(conn):
     by_stage = {row["stage"]: row["cost_usd"] for row in rows}
     assert by_stage["qualification"] is None
     assert by_stage["discovery_web"] == 0.0
+
+
+def test_each_wave_is_split_by_its_own_reviewed_people(conn):
+    _hunt(conn, "h1", reviewed_n=7)
+    import_research_events(
+        conn,
+        [
+            {"stage": "discovery_web", "cost_usd": 4.0, "request_id": "w1", "wave_id": "wave-1"},
+            {"stage": "discovery_web", "cost_usd": 3.0, "request_id": "w2", "wave_id": "wave-2"},
+        ],
+        profile_id="oneaway",
+        hunt_id="h1",
+    )
+    record_review_batch(
+        conn,
+        "oneaway",
+        "h1",
+        [{"entity_key": f"a{i}", "source_channel": "web", "wave_id": "wave-1"} for i in range(4)]
+        + [{"entity_key": f"b{i}", "source_channel": "x", "wave_id": "wave-2"} for i in range(3)],
+    )
+    refresh_wave_allocations(conn, "h1")
+    shares = {
+        row["entity_key"]: row["cost_usd"]
+        for row in conn.execute(
+            """
+            SELECT entity_key, cost_usd FROM cost_events
+            WHERE allocation_method = 'equal_split' AND cost_scope = 'candidate'
+            """
+        )
+    }
+    assert shares == {**{f"a{i}": 1.0 for i in range(4)}, **{f"b{i}": 1.0 for i in range(3)}}
+    report = campaign_report(conn, "oneaway")
+    assert report["totalUsd"] == pytest.approx(7.0)
+    unknown_spend = sum(row["spend"] or 0 for row in report["bySource"] if row["name"] == "Unknown")
+    assert unknown_spend == pytest.approx(0)
+
+
+def test_early_entity_key_stays_on_the_same_person(conn):
+    _hunt(conn, "h1")
+    record_funnel(
+        conn,
+        profile_id="oneaway",
+        event_type="candidate_reviewed",
+        candidate_id="cand_ada",
+        entity_key="ada|acme",
+        source_channel="Web",
+        signal_family="action_trigger",
+        hunt_id="h1",
+        metadata={"entity_aliases": ["ada"]},
+    )
+    import_research_events(
+        conn,
+        [
+            {"stage": "qualification", "entity_key": "ada", "cost_usd": 0.4, "request_id": "q"},
+            {"stage": "deepening", "entity_key": "ada|acme", "cost_usd": 0.6, "request_id": "d"},
+        ],
+        profile_id="oneaway",
+        hunt_id="h1",
+    )
+    report = campaign_report(conn, "oneaway")
+    web = next(row for row in report["bySource"] if row["name"] == "Web")
+    family = next(row for row in report["bySignal"] if row["name"] == "action_trigger")
+    assert web["spend"] == pytest.approx(1.0)
+    assert family["spend"] == pytest.approx(1.0)
+    unknown = next((row for row in report["bySource"] if row["name"] == "Unknown"), None)
+    assert unknown is None or (unknown["spend"] or 0) == pytest.approx(0)
+
+
+def test_legacy_approval_does_not_push_conversion_over_100(conn):
+    record_funnel(conn, profile_id="oneaway", event_type="candidate_reviewed", candidate_id="ready_person", entity_key="ready")
+    record_funnel(conn, profile_id="oneaway", event_type="outreach_ready", candidate_id="ready_person", entity_key="ready")
+    record_funnel(conn, profile_id="oneaway", event_type="human_approved", candidate_id="ready_person", entity_key="ready")
+    record_funnel(conn, profile_id="oneaway", event_type="human_approved", candidate_id="old_person", entity_key="old")
+    report = campaign_report(conn, "oneaway")
+    approved = next(row for row in report["funnel"] if row["key"] == "approved")
+    assert approved["people"] == 1
+    assert report["legacyExcluded"]["approved"] == 1
+    assert approved["conversion"]["rate"] == 1
+    assert approved["conversion"]["rate"] <= 1
+
+
+def test_signal_family_reuses_the_reply_reason_trigger():
+    from trace_reply_reason import signal_family_for
+
+    assert signal_family_for({"reply_reason": {"trigger_type": "behavior_trigger"}}) == "behavior_trigger"
+    assert signal_family_for({"signal_family": "action_trigger"}) == "action_trigger"
+    assert signal_family_for({}) == "unknown"
 
 
 def test_economics_module_has_no_product_name_branch():
